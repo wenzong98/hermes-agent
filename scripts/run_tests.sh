@@ -57,6 +57,16 @@ if [ -f "$HOME/.hermes/pytest_live_guard.py" ]; then
   EXTRA_PYTEST_PLUGINS="pytest_live_guard"
 fi
 
+# ── hermes-adaptive-router (standalone package) ──────────────────────────────
+ADAPTIVE_ROUTER_DIR="$HOME/.hermes/hermes-adaptive-router/src"
+if [ -d "$ADAPTIVE_ROUTER_DIR" ]; then
+  if [ -n "$EXTRA_PYTHONPATH" ]; then
+    EXTRA_PYTHONPATH="$EXTRA_PYTHONPATH:$ADAPTIVE_ROUTER_DIR"
+  else
+    EXTRA_PYTHONPATH="$ADAPTIVE_ROUTER_DIR"
+  fi
+fi
+
 
 # ── Run in hermetic env ──────────────────────────────────────────────────────
 # env -i: start with empty environment, opt-in only what we need.
