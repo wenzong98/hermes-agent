@@ -121,6 +121,18 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if tool_guidance:
         stable_parts.append(" ".join(tool_guidance))
 
+    if "web_search" in agent.valid_tool_names or "web_extract" in agent.valid_tool_names:
+        try:
+            from agent.adaptive_query_router import build_adaptive_query_routing_prompt
+
+            adaptive_web_guidance = build_adaptive_query_routing_prompt(agent.valid_tool_names)
+            if adaptive_web_guidance:
+                stable_parts.append(adaptive_web_guidance)
+        except Exception:
+            # Web routing guidance is an optimization; prompt assembly must not
+            # fail if config.yaml is malformed or the helper is unavailable.
+            pass
+
     # Computer-use (macOS) — goes in as its own block rather than being
     # merged into tool_guidance because the content is multi-paragraph.
     if "computer_use" in agent.valid_tool_names:

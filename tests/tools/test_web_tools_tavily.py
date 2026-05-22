@@ -91,6 +91,12 @@ class TestNormalizeTavilySearchResults:
         assert result["success"] is True
         assert result["data"]["web"] == []
 
+    def test_answer_is_preserved_for_search_summary_first_routing(self):
+        from tools.web_tools import _normalize_tavily_search_results
+        result = _normalize_tavily_search_results({"answer": "Tavily synthesized answer", "results": []})
+        assert result["success"] is True
+        assert result["data"]["answer"] == "Tavily synthesized answer"
+
     def test_missing_fields(self):
         from tools.web_tools import _normalize_tavily_search_results
         result = _normalize_tavily_search_results({"results": [{}]})
@@ -190,6 +196,29 @@ class TestWebSearchTavily:
             assert result["success"] is True
             assert len(result["data"]["web"]) == 1
             assert result["data"]["web"][0]["title"] == "Result"
+
+    def test_adaptive_summary_first_search_requests_tavily_answer(self):
+        from agent.adaptive_query_router import AdaptiveQueryRoutingConfig
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "answer": "Synthesized search answer",
+            "results": [{"title": "Result", "url": "https://r.com", "content": "desc", "score": 0.9}],
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("tools.web_tools._get_backend", return_value="tavily"), \
+             patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}), \
+             patch("plugins.web.tavily.provider.load_adaptive_query_routing_config", return_value=AdaptiveQueryRoutingConfig(enabled=True, prefer_search_summary=True, tavily_answer="advanced")), \
+             patch("tools.web_tools.httpx.post", return_value=mock_response) as mock_post, \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            from tools.web_tools import web_search_tool
+            result = json.loads(web_search_tool("recent AI news", limit=3))
+
+        payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1]["json"]
+        assert payload["include_answer"] == "advanced"
+        assert payload["search_depth"] == "advanced"
+        assert result["data"]["answer"] == "Synthesized search answer"
 
 
 # ─── web_extract_tool (Tavily dispatch) ───────────────────────────────────────

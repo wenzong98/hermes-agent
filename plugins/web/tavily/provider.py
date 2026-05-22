@@ -37,6 +37,7 @@ import os
 from typing import Any, Dict, List
 
 from agent.web_search_provider import WebSearchProvider
+from agent.adaptive_query_router import load_adaptive_query_routing_config
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,14 @@ def _normalize_tavily_search_results(response: Dict[str, Any]) -> Dict[str, Any]
                 "position": i + 1,
             }
         )
-    return {"success": True, "data": {"web": web_results}}
+    data: Dict[str, Any] = {"web": web_results}
+    answer = response.get("answer")
+    if isinstance(answer, str) and answer.strip():
+        data["answer"] = answer.strip()
+    follow_up_questions = response.get("follow_up_questions")
+    if isinstance(follow_up_questions, list) and follow_up_questions:
+        data["follow_up_questions"] = follow_up_questions
+    return {"success": True, "data": data}
 
 
 def _normalize_tavily_documents(
@@ -171,15 +179,18 @@ class TavilyWebSearchProvider(WebSearchProvider):
                 return {"success": False, "error": "Interrupted"}
 
             logger.info("Tavily search: '%s' (limit=%d)", query, limit)
-            raw = _tavily_request(
-                "search",
-                {
-                    "query": query,
-                    "max_results": min(limit, 20),
-                    "include_raw_content": False,
-                    "include_images": False,
-                },
-            )
+            payload: Dict[str, Any] = {
+                "query": query,
+                "max_results": min(limit, 20),
+                "include_raw_content": False,
+                "include_images": False,
+            }
+            adaptive_cfg = load_adaptive_query_routing_config()
+            if adaptive_cfg.enabled and adaptive_cfg.prefer_search_summary and adaptive_cfg.tavily_answer:
+                payload["include_answer"] = adaptive_cfg.tavily_answer
+                if str(adaptive_cfg.tavily_answer).lower() == "advanced":
+                    payload["search_depth"] = "advanced"
+            raw = _tavily_request("search", payload)
             return _normalize_tavily_search_results(raw)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
