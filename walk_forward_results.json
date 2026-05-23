@@ -1,0 +1,596 @@
+[
+  {
+    "train_start": "2000-07-21",
+    "train_end": "2002-08-15",
+    "test_start": "2002-08-16",
+    "test_end": "2003-04-24",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": 2.972,
+    "test_cagr": "4.16%",
+    "test_max_dd": "-0.30%",
+    "test_return": "0.85%",
+    "benchmark_return": "10.85%"
+  },
+  {
+    "train_start": "2001-03-30",
+    "train_end": "2003-04-24",
+    "test_start": "2003-04-25",
+    "test_end": "2004-01-01",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": 3.686,
+    "test_cagr": "2.48%",
+    "test_max_dd": "-0.12%",
+    "test_return": "0.51%",
+    "benchmark_return": "6.33%"
+  },
+  {
+    "train_start": "2001-12-07",
+    "train_end": "2004-01-01",
+    "test_start": "2004-01-02",
+    "test_end": "2004-09-09",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.30000000000000004
+    },
+    "test_sharpe": 0.808,
+    "test_cagr": "0.77%",
+    "test_max_dd": "-0.40%",
+    "test_return": "0.16%",
+    "benchmark_return": "0.75%"
+  },
+  {
+    "train_start": "2002-08-16",
+    "train_end": "2004-09-09",
+    "test_start": "2004-09-10",
+    "test_end": "2005-05-19",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.30000000000000004
+    },
+    "test_sharpe": 1.305,
+    "test_cagr": "1.68%",
+    "test_max_dd": "-0.47%",
+    "test_return": "0.34%",
+    "benchmark_return": "2.37%"
+  },
+  {
+    "train_start": "2003-04-25",
+    "train_end": "2005-05-19",
+    "test_start": "2005-05-20",
+    "test_end": "2006-01-26",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": 1.11,
+    "test_cagr": "0.76%",
+    "test_max_dd": "-0.27%",
+    "test_return": "0.16%",
+    "benchmark_return": "0.96%"
+  },
+  {
+    "train_start": "2004-01-02",
+    "train_end": "2006-01-26",
+    "test_start": "2006-01-27",
+    "test_end": "2006-10-05",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": 3.851,
+    "test_cagr": "2.43%",
+    "test_max_dd": "-0.14%",
+    "test_return": "0.50%",
+    "benchmark_return": "5.55%"
+  },
+  {
+    "train_start": "2004-09-10",
+    "train_end": "2006-10-05",
+    "test_start": "2006-10-06",
+    "test_end": "2007-06-14",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "3.20%"
+  },
+  {
+    "train_start": "2005-05-20",
+    "train_end": "2007-06-14",
+    "test_start": "2007-06-15",
+    "test_end": "2008-02-21",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -3.983,
+    "test_cagr": "-0.07%",
+    "test_max_dd": "-0.01%",
+    "test_return": "-0.01%",
+    "benchmark_return": "-7.81%"
+  },
+  {
+    "train_start": "2006-01-27",
+    "train_end": "2008-02-21",
+    "test_start": "2008-02-22",
+    "test_end": "2008-10-30",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -3.983,
+    "test_cagr": "-0.07%",
+    "test_max_dd": "-0.01%",
+    "test_return": "-0.01%",
+    "benchmark_return": "-21.39%"
+  },
+  {
+    "train_start": "2006-10-06",
+    "train_end": "2008-10-30",
+    "test_start": "2008-10-31",
+    "test_end": "2009-07-09",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "-2.69%"
+  },
+  {
+    "train_start": "2007-06-15",
+    "train_end": "2009-07-09",
+    "test_start": "2009-07-10",
+    "test_end": "2010-03-18",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "7.07%"
+  },
+  {
+    "train_start": "2008-02-22",
+    "train_end": "2010-03-18",
+    "test_start": "2010-03-19",
+    "test_end": "2010-11-25",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -3.983,
+    "test_cagr": "-0.07%",
+    "test_max_dd": "-0.01%",
+    "test_return": "-0.01%",
+    "benchmark_return": "3.58%"
+  },
+  {
+    "train_start": "2008-10-31",
+    "train_end": "2010-11-25",
+    "test_start": "2010-11-26",
+    "test_end": "2011-08-04",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "-6.54%"
+  },
+  {
+    "train_start": "2009-07-10",
+    "train_end": "2011-08-04",
+    "test_start": "2011-08-05",
+    "test_end": "2012-04-12",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "2.15%"
+  },
+  {
+    "train_start": "2010-03-19",
+    "train_end": "2012-04-12",
+    "test_start": "2012-04-13",
+    "test_end": "2012-12-20",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "2.67%"
+  },
+  {
+    "train_start": "2010-11-26",
+    "train_end": "2012-12-20",
+    "test_start": "2012-12-21",
+    "test_end": "2013-08-29",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -3.983,
+    "test_cagr": "-0.07%",
+    "test_max_dd": "-0.01%",
+    "test_return": "-0.01%",
+    "benchmark_return": "-0.58%"
+  },
+  {
+    "train_start": "2011-08-05",
+    "train_end": "2013-08-29",
+    "test_start": "2013-08-30",
+    "test_end": "2014-05-08",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "0.45%"
+  },
+  {
+    "train_start": "2012-04-13",
+    "train_end": "2014-05-08",
+    "test_start": "2014-05-09",
+    "test_end": "2015-01-15",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "-3.38%"
+  },
+  {
+    "train_start": "2012-12-21",
+    "train_end": "2015-01-15",
+    "test_start": "2015-01-16",
+    "test_end": "2015-09-24",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -3.983,
+    "test_cagr": "-0.07%",
+    "test_max_dd": "-0.01%",
+    "test_return": "-0.01%",
+    "benchmark_return": "-7.39%"
+  },
+  {
+    "train_start": "2013-08-30",
+    "train_end": "2015-09-24",
+    "test_start": "2015-09-25",
+    "test_end": "2016-06-02",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "2.42%"
+  },
+  {
+    "train_start": "2014-05-09",
+    "train_end": "2016-06-02",
+    "test_start": "2016-06-03",
+    "test_end": "2017-02-09",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "1.86%"
+  },
+  {
+    "train_start": "2015-01-16",
+    "train_end": "2017-02-09",
+    "test_start": "2017-02-10",
+    "test_end": "2017-10-19",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "4.99%"
+  },
+  {
+    "train_start": "2015-09-25",
+    "train_end": "2017-10-19",
+    "test_start": "2017-10-20",
+    "test_end": "2018-06-28",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -3.983,
+    "test_cagr": "-0.07%",
+    "test_max_dd": "-0.01%",
+    "test_return": "-0.01%",
+    "benchmark_return": "1.94%"
+  },
+  {
+    "train_start": "2016-06-03",
+    "train_end": "2018-06-28",
+    "test_start": "2018-06-29",
+    "test_end": "2019-03-07",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "5.63%"
+  },
+  {
+    "train_start": "2017-02-10",
+    "train_end": "2019-03-07",
+    "test_start": "2019-03-08",
+    "test_end": "2019-11-14",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "4.62%"
+  },
+  {
+    "train_start": "2017-10-20",
+    "train_end": "2019-11-14",
+    "test_start": "2019-11-15",
+    "test_end": "2020-07-23",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -3.983,
+    "test_cagr": "-0.07%",
+    "test_max_dd": "-0.01%",
+    "test_return": "-0.01%",
+    "benchmark_return": "5.29%"
+  },
+  {
+    "train_start": "2018-06-29",
+    "train_end": "2020-07-23",
+    "test_start": "2020-07-24",
+    "test_end": "2021-04-01",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "2.99%"
+  },
+  {
+    "train_start": "2019-03-08",
+    "train_end": "2021-04-01",
+    "test_start": "2021-04-02",
+    "test_end": "2021-12-09",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "3.49%"
+  },
+  {
+    "train_start": "2019-11-15",
+    "train_end": "2021-12-09",
+    "test_start": "2021-12-10",
+    "test_end": "2022-08-18",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "12.41%"
+  },
+  {
+    "train_start": "2020-07-24",
+    "train_end": "2022-08-18",
+    "test_start": "2022-08-19",
+    "test_end": "2023-04-27",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -3.983,
+    "test_cagr": "-0.07%",
+    "test_max_dd": "-0.01%",
+    "test_return": "-0.01%",
+    "benchmark_return": "3.95%"
+  },
+  {
+    "train_start": "2021-04-02",
+    "train_end": "2023-04-27",
+    "test_start": "2023-04-28",
+    "test_end": "2024-01-04",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "4.56%"
+  },
+  {
+    "train_start": "2021-12-10",
+    "train_end": "2024-01-04",
+    "test_start": "2024-01-05",
+    "test_end": "2024-09-12",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -4.416,
+    "test_cagr": "-0.10%",
+    "test_max_dd": "-0.02%",
+    "test_return": "-0.02%",
+    "benchmark_return": "0.96%"
+  },
+  {
+    "train_start": "2022-08-19",
+    "train_end": "2024-09-12",
+    "test_start": "2024-09-13",
+    "test_end": "2025-05-22",
+    "best_params": {
+      "cape_buy": 15.0,
+      "cape_expensive": 25.0,
+      "cape_extreme": 35.0,
+      "rsi_overbought": 65.0,
+      "sell_return_1": 0.2
+    },
+    "test_sharpe": -3.983,
+    "test_cagr": "-0.07%",
+    "test_max_dd": "-0.01%",
+    "test_return": "-0.01%",
+    "benchmark_return": "3.94%"
+  }
+]

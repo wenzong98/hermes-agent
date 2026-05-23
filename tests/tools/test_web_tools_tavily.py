@@ -209,7 +209,7 @@ class TestWebSearchTavily:
 
         with patch("tools.web_tools._get_backend", return_value="tavily"), \
              patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}), \
-             patch("plugins.web.tavily.provider.load_adaptive_query_routing_config", return_value=AdaptiveQueryRoutingConfig(enabled=True, prefer_search_summary=True, tavily_answer="advanced")), \
+             patch("agent.adaptive_query_router.load_adaptive_query_routing_config", return_value=AdaptiveQueryRoutingConfig(enabled=True, prefer_search_summary=True, tavily_answer="advanced")), \
              patch("tools.web_tools.httpx.post", return_value=mock_response) as mock_post, \
              patch("tools.interrupt.is_interrupted", return_value=False):
             from tools.web_tools import web_search_tool

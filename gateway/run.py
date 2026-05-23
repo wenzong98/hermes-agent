@@ -8877,7 +8877,12 @@ class GatewayRunner:
         """
         from agent.model_metadata import get_model_context_length, DEFAULT_FALLBACK_CONTEXT
 
-        model = _resolve_gateway_model()
+        # Safely resolve model name
+        try:
+            model = _resolve_gateway_model()
+        except Exception:
+            model = "unknown"
+        
         config_context_length = None
         provider = None
         base_url = None
@@ -8977,7 +8982,7 @@ class GatewayRunner:
 
         lines = [
             f"◆ Model: `{model}`",
-            f"◆ Provider: {provider or 'openrouter'}",
+            f"◆ Provider: {provider or 'default'}",
             f"◆ Context: {ctx_display} tokens ({ctx_source})",
         ]
 
@@ -9071,8 +9076,12 @@ class GatewayRunner:
         # Resolve session config info to surface to the user
         try:
             session_info = self._format_session_info()
-        except Exception:
+            logger.info("_handle_reset_command: session_info=%r", session_info)
+            if not session_info:
+                logger.warning("_handle_reset_command: session_info is EMPTY!")
+        except Exception as _si_err:
             session_info = ""
+            logger.warning("_handle_reset_command: _format_session_info failed: %s", _si_err, exc_info=True)
 
         if new_entry:
             header = self._telegram_topic_new_header(source) or t("gateway.reset.header_default")

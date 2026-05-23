@@ -533,6 +533,67 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 args_preview = args_str[:agent.log_prefix_chars] + "..." if len(args_str) > agent.log_prefix_chars else args_str
                 print(f"  📞 Tool {i}: {function_name}({list(function_args.keys())}) - {args_preview}")
 
+        # Per-query routing: if current model tier is simple but the tool is
+        # FORCE_COMPLEX, re-classify and upgrade the model tier before dispatch.
+        # This ensures that e.g. a "simple" session that suddenly needs to
+        # write_file or execute_code is handled by kimi-k2.6, not MiniMax.
+        if not _execution_blocked:
+            try:
+                from agent.task_complexity_router import (
+                    Complexity,
+                    classify,
+                    activate_model_tier,
+                    get_current_routing_context,
+                    get_tool_tier_for_upgrade,
+                )
+                ctx = get_current_routing_context()
+                current_complexity = ctx.get("complexity", "simple") if ctx else "simple"
+                required_tier = get_tool_tier_for_upgrade(function_name)
+                if required_tier == Complexity.COMPLEX and current_complexity in ("simple", "unknown"):
+                    # Re-classify based on the tool and its args
+                    desc = f"{function_name} with args {str(function_args)[:100]}"
+                    decision = classify(desc, tool_name=function_name, tool_args=function_args)
+                    # FORCE_COMPLEX / FORCE_SIMPLE are not accepted by activate_model_tier;
+                    # normalize to base complexity so the switch proceeds.
+                    if decision.complexity in (Complexity.FORCE_COMPLEX, Complexity.COMPLEX):
+                        from agent.task_complexity_router import _resolve_complexity, RouteDecision
+                        _normalized = _resolve_complexity(decision.complexity)
+                        _switch_decision = RouteDecision(
+                            complexity=_normalized,
+                            primary_signal=decision.primary_signal,
+                            matched_rules=decision.matched_rules,
+                            suggested_model=decision.suggested_model,
+                            suggested_provider=decision.suggested_provider,
+                            reason=decision.reason,
+                            latency_ms=getattr(decision, "latency_ms", 0.0),
+                        )
+                        _tool_switched = activate_model_tier(agent, _switch_decision)
+
+                        # 流式提示：工具触发模型切换
+                        if agent.stream_delta_callback:
+                            if _tool_switched:
+                                _tool_switch_msg = (
+                                    f"\n🔀 Router判断：工具 '{function_name}' 触发模型升级，"
+                                    f"正在切换到 {decision.suggested_model} "
+                                    f"({decision.suggested_provider})\n"
+                                )
+                            else:
+                                _tool_switch_msg = (
+                                    f"\n🔀 Router判断：工具 '{function_name}' 需要复杂模型，"
+                                    f"保持当前模型\n"
+                                )
+                            try:
+                                agent.stream_delta_callback(_tool_switch_msg)
+                            except Exception:
+                                pass
+
+                        logger.debug(
+                            "[Per-Query Routing] Tool '%s' triggered model upgrade to %s/%s",
+                            function_name, decision.suggested_provider, decision.suggested_model,
+                        )
+            except Exception as _reroute_err:
+                logger.debug("[Per-Query Routing] Routing upgrade check failed (non-fatal): %s", _reroute_err)
+
         if not _execution_blocked:
             agent._current_tool = function_name
             agent._touch_activity(f"executing tool: {function_name}")

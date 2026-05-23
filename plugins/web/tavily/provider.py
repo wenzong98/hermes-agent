@@ -37,7 +37,7 @@ import os
 from typing import Any, Dict, List
 
 from agent.web_search_provider import WebSearchProvider
-from agent.adaptive_query_router import load_adaptive_query_routing_config
+from agent.task_complexity_router import get_current_routing_context
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +178,11 @@ class TavilyWebSearchProvider(WebSearchProvider):
             if is_interrupted():
                 return {"success": False, "error": "Interrupted"}
 
+            # Read task-complexity routing context to boost search quality for complex tasks
+            routing_ctx = get_current_routing_context()
+            complexity = routing_ctx.get("complexity", "")
+            is_complex = complexity == "complex"
+
             logger.info("Tavily search: '%s' (limit=%d)", query, limit)
             payload: Dict[str, Any] = {
                 "query": query,
@@ -185,11 +190,23 @@ class TavilyWebSearchProvider(WebSearchProvider):
                 "include_raw_content": False,
                 "include_images": False,
             }
-            adaptive_cfg = load_adaptive_query_routing_config()
-            if adaptive_cfg.enabled and adaptive_cfg.prefer_search_summary and adaptive_cfg.tavily_answer:
-                payload["include_answer"] = adaptive_cfg.tavily_answer
-                if str(adaptive_cfg.tavily_answer).lower() == "advanced":
-                    payload["search_depth"] = "advanced"
+
+            # Boost search quality when task-complexity router classified as complex
+            if is_complex:
+                payload["max_results"] = min(payload["max_results"] * 2, 20)
+                payload["search_depth"] = "advanced"
+
+            # adaptive_query_routing still controls answer/summary preference
+            try:
+                from agent.adaptive_query_router import load_adaptive_query_routing_config
+                adaptive_cfg = load_adaptive_query_routing_config()
+                if adaptive_cfg.enabled and adaptive_cfg.prefer_search_summary and adaptive_cfg.tavily_answer:
+                    # Don't override search_depth if already set by complexity routing
+                    if "search_depth" not in payload:
+                        payload["search_depth"] = "advanced" if str(adaptive_cfg.tavily_answer).lower() == "advanced" else "basic"
+                    payload["include_answer"] = adaptive_cfg.tavily_answer
+            except Exception:
+                pass
             raw = _tavily_request("search", payload)
             return _normalize_tavily_search_results(raw)
         except ValueError as exc:

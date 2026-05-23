@@ -1,0 +1,17 @@
+{
+  "start_date": "1999-09-26",
+  "end_date": "2025-12-30",
+  "n_years": 26.26,
+  "total_return": "2883.51%",
+  "benchmark_return": "901.76%",
+  "cagr": "13.80%",
+  "benchmark_cagr": "9.17%",
+  "volatility": "340.08%",
+  "sharpe_ratio": 0.041,
+  "sortino_ratio": 0.03,
+  "max_drawdown": "-142.73%",
+  "benchmark_max_drawdown": "-65.91%",
+  "win_rate": "51.70%",
+  "final_value": 298351.24,
+  "benchmark_final_value": 99386.47
+}

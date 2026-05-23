@@ -128,10 +128,14 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             adaptive_web_guidance = build_adaptive_query_routing_prompt(agent.valid_tool_names)
             if adaptive_web_guidance:
                 stable_parts.append(adaptive_web_guidance)
-        except Exception:
+        except Exception as _exc:
             # Web routing guidance is an optimization; prompt assembly must not
             # fail if config.yaml is malformed or the helper is unavailable.
-            pass
+            import logging as _log
+            _log.warning(
+                "[system_prompt] adaptive query routing prompt build failed: %s",
+                _exc,
+            )
 
     # Computer-use (macOS) — goes in as its own block rather than being
     # merged into tool_guidance because the content is multi-paragraph.

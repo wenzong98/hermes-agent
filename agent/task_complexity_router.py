@@ -48,7 +48,6 @@ class Complexity(Enum):
 @dataclass
 class RouteDecision:
     complexity: Complexity
-    confidence: float          # 0.0–1.0
     primary_signal: str       # 触发决策的主要信号
     matched_rules: list[str]  # 命中的规则列表
     suggested_model: str      # 建议模型
@@ -63,7 +62,6 @@ class RoutingEvent:
     timestamp: str
     query: str
     complexity: str
-    confidence: float
     primary_signal: str
     matched_rules: list
     suggested_model: str
@@ -78,49 +76,54 @@ class RoutingEvent:
 
 
 # ---------------------------------------------------------------------------
-# Complexity signals — 启发式规则
+# Complexity signals — 基于50条 LLM 标注样本重新设计的启发式规则
 # ---------------------------------------------------------------------------
 
-# 强信号：出现这些词 → complex（置信度高）
-_COMPLEX_KEYWORDS = {
-    # 规划和架构
-    "规划", "设计", "架构", "架构设计", "方案", "解决方案",
-    "plan", "design", "architect", "architecture", "solution",
-    # 代码开发
-    "实现", "开发", "写代码", "编程", "代码", "debug", "调试",
-    "implement", "develop", "coding", "code", "program",
-    "refactor", "重构", "优化性能", "optimize",
-    "写一个", "写段", "写个", "帮我写", "create function",
-    "class ", "def ", "function", "algorithm",
-    "bug", "error", "exception", "traceback",
-    # 研究和分析
-    "调研", "研究", "分析", "对比", "评估", "调研报告",
-    "research", "analyze", "analyse", "compare", "evaluate",
-    "investigate", "调查",
-    # 复杂操作
-    "部署", "上线", "迁移", "集成", "对接",
-    "deploy", "deploy", "migration", "integration",
-}
+# 匹配则 → complex（优先级高）
+_COMPLEX_PATTERNS: list[str] = [
+    # 代码构建/配置文件
+    r"dockerfile", r"makefile", r"单元测试",
+    # 创建项目/系统
+    r"写一个.*爬虫", r"创建一个.*项目", r"帮我创建一个",
+    r"写一个.*项目", r"写一个.*系统", r"写一个.*应用",
+    r"算法", r"架构", r"系统设计",
+    # 调研分析
+    r"调研", r"研究",
+    # 代码 debug/review/重构
+    r"\bdebug\b",
+    r"帮我review", r"帮我分析这段代码",
+    r"帮我优化这段", r"帮我.*修复", r"帮我重构这段",
+    r"内存泄漏", r"性能.*优化",
+    # 部署/迁移
+    r"部署", r"迁移数据库",
+    # 多动作组合
+    r"验证.*修复", r"深度验证", r"并.*修复",
+    r"增加更多.*测试", r"写一个.*正则",
+]
 
-# 弱信号：出现这些词 → simple（但整体偏 complex 时会覆盖）
-_SIMPLE_KEYWORDS = {
-    # 读取状态
-    "查看", "显示", "列出", "获取", "读取", "检查", "状态",
-    "show", "list", "get", "read", "check", "status", "display",
-    "what is", "where is", "who is", "how many", "多少",
-    # 简单问答题
-    "什么是", "怎么", "如何", "why is", "when did",
-    "解释", "说明", "讲讲",
-    # 配置相关
-    "配置", "config", "setting", "配置信息",
-}
+# 匹配则 → simple（优先级低，只有 complex 未命中时才生效）
+_SIMPLE_PATTERNS: list[str] = [
+    # 简单 CLI 命令
+    r"^list", r"^ls", r"^cat", r"^head", r"^pwd", r"^whoami", r"^date", r"^uptime",
+    # 读/查看动作
+    r"^查看", r"^显示", r"^列出", r"^读", r"^统计",
+    r"^给我看看", r"^看看",
+    # 查询类
+    r"^查一下", r"^查下", r"^帮我查",
+    # 问答题
+    r"是什么", r"什么意思", r"哪里", r"哪个",
+    # 简单文件操作
+    r"复制.*目录", r"移动.*目录", r"整理.*文件", r"压缩.*文件夹", r"清理缓存",
+    # 简单生成
+    r"生成密钥", r"生成证书", r"缩小图片", r"调整尺寸",
+    # 状态检查
+    r"磁盘使用", r"内存占用", r"网络连接", r"配置信息",
+    # 简单脚本
+    r"帮我写shell脚本",
+    # 更新操作
+    r"更新.*版本", r"升级.*依赖",
+]
 
-# Token count 阈值
-_TOKEN_COUNT_SIMPLE_MAX = 150      # 中文约 100 字符，英文约 150 词
-_TOKEN_COUNT_LIKELY_COMPLEX_MIN = 300  # 超过这个几乎肯定是复杂任务
-
-# 低置信度仲裁阈值：低于此值时调用 MiniMax 高速版二次判断
-_ARBITRATION_CONFIDENCE_THRESHOLD = 0.72
 # 仲裁模型配置（MiniMax 高速版）
 _ARBITRATION_PROVIDER = "minimax"
 _ARBITRATION_MODEL = "MiniMax-M2.7-highspeed"
@@ -240,7 +243,6 @@ def estimate_tokens(text: str) -> int:
 
 def _make_decision(
     complexity: Complexity,
-    confidence: float,
     primary_signal: str,
     matched_rules: list[str],
     reason: str,
@@ -252,7 +254,6 @@ def _make_decision(
     default = tier["default"]
     return RouteDecision(
         complexity=complexity,
-        confidence=confidence,
         primary_signal=primary_signal,
         matched_rules=matched_rules,
         suggested_model=default["model"],
@@ -270,48 +271,69 @@ def _arbitrate_with_minimax(query: str) -> tuple[Complexity, str]:
     """
     当启发式分类置信度低于阈值时，调用 MiniMax 高速版进行仲裁。
 
+    使用流式输出 + 早停：一旦在 text delta 中检测到 simple/complex 即返回，
+    无需等待完整的 thinking 推理过程。
+
     返回 (complexity, reason)。
     如果仲裁失败，返回 (Complexity.SIMPLE, "仲裁失败，默认 simple")。
     """
     try:
-        from agent.auxiliary_client import call_llm
+        from hermes_cli.auth import resolve_api_key_provider_credentials
+        import os
 
-        arb_messages = [
-            {
-                "role": "system",
-                "content": (
-                    "你是一个任务复杂度判断助手。"
-                    "用户输入是一个需要 AI 处理的任务描述。"
-                    "请判断这个任务应该使用「简单模型」还是「复杂模型」处理。"
-                    "简单模型：适合查看、列出、检查状态、简单问答等轻量任务。"
-                    "复杂模型：适合代码实现、架构设计、调试优化、调研分析等重任务。"
-                    "只回答一个单词：simple 或 complex。不要解释。"
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"任务描述：{query}\n\n判断结果（simple/complex）：",
-            },
-        ]
+        # 解析 MiniMax 凭证
+        creds = resolve_api_key_provider_credentials("minimax")
+        api_key = creds.get("api_key") or os.environ.get("MINIMAX_API_KEY", "")
+        base_url = creds.get("base_url") or os.environ.get("MINIMAX_BASE_URL", "")
+        if not base_url:
+            base_url = "https://api.minimaxi.com/anthropic"
 
-        resp = call_llm(
-            task="task_complexity_arbitration",
-            provider=_ARBITRATION_PROVIDER,
+        from anthropic import Anthropic
+        client = Anthropic(api_key=api_key, base_url=base_url)
+
+        stream = client.messages.stream(
             model=_ARBITRATION_MODEL,
-            messages=arb_messages,
-            temperature=0.0,
-            max_tokens=10,
-            timeout=10.0,
+            max_tokens=200,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是一个任务复杂度判断助手。"
+                        "用户输入是一个需要 AI 处理的任务描述。"
+                        "请判断这个任务应该使用「简单模型」还是「复杂模型」处理。"
+                        "简单模型：适合查看、列出、检查状态、简单问答等轻量任务。"
+                        "复杂模型：适合代码实现、架构设计、调试优化、调研分析等重任务。"
+                        "只回答一个单词：simple 或 complex。不要解释。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"任务描述：{query}\n\n判断结果（simple/complex）：",
+                },
+            ],
         )
-        raw = (resp.choices[0].message.content or "").strip().lower()
+        ms = stream.__enter__()
+        try:
+            for event in ms:
+                if event.type == "content_block_delta":
+                    if hasattr(event.delta, "text") and event.delta.text:
+                        text = event.delta.text.strip().lower()
+                        if "simple" in text or "complex" in text:
+                            raw = text
+                            if "complex" in raw:
+                                return Complexity.COMPLEX, f"MiniMax仲裁(流式): 判定为复杂任务 (raw={raw})"
+                            else:
+                                return Complexity.SIMPLE, f"MiniMax仲裁(流式): 判定为简单任务 (raw={raw})"
+        finally:
+            # 强制关闭 HTTP 连接（避免等完整思考过程）
+            try:
+                ms._raw_stream.response.close()
+            except Exception:
+                pass
+            stream.__exit__(None, None, None)
 
-        if "complex" in raw:
-            return Complexity.COMPLEX, f"MiniMax仲裁: 判定为复杂任务 (raw={raw})"
-        elif "simple" in raw:
-            return Complexity.SIMPLE, f"MiniMax仲裁: 判定为简单任务 (raw={raw})"
-        else:
-            # 无法解析，默认 simple
-            return Complexity.SIMPLE, f"MiniMax仲裁: 输出不可解析 (raw={raw})，默认 simple"
+        # 流式结束未命中
+        return Complexity.SIMPLE, "MiniMax仲裁(流式): 输出不含判定词，默认 simple"
 
     except Exception as exc:
         logging.debug("[TaskComplexityRouter] MiniMax 仲裁失败: %s", exc)
@@ -323,17 +345,13 @@ def classify_query(query: str, tool_name: Optional[str] = None) -> RouteDecision
     核心分类函数。输入用户消息和可选的工具名，
     返回 RouteDecision（包含 complexity、suggested_model 等）。
 
-    流程：
-    1. 先走纯启发式分类（零 LLM 调用）
-    2. 如果置信度 < _ARBITRATION_CONFIDENCE_THRESHOLD，调用 MiniMax 高速版仲裁
-    3. 返回最终决策
+    基于 50 条 LLM 标注样本重新设计的纯启发式规则，
+    无额外 LLM 调用，零延迟开销。
     """
     start = time.monotonic()
     query = query.strip()
-    tokens = estimate_tokens(query)
-    query_lower = query.lower()
 
-    # ── 1. 工具名强制覆盖 ────────────────────────────────────────────────
+    # ── 工具名强制覆盖（不走规则）────────────────────────────────────────
     if tool_name:
         for pattern, complexity in TOOL_COMPLEXITY_MAP.items():
             if pattern.endswith("*"):
@@ -341,7 +359,6 @@ def classify_query(query: str, tool_name: Optional[str] = None) -> RouteDecision
                 if tool_name.startswith(prefix):
                     return _make_decision(
                         complexity,
-                        confidence=1.0,
                         primary_signal=f"tool:{tool_name}",
                         matched_rules=[f"TOOL_MAP:{pattern}"],
                         reason=f"工具 {tool_name} 映射为 {complexity.value}",
@@ -350,128 +367,48 @@ def classify_query(query: str, tool_name: Optional[str] = None) -> RouteDecision
             elif tool_name == pattern:
                 return _make_decision(
                     complexity,
-                    confidence=1.0,
                     primary_signal=f"tool:{tool_name}",
                     matched_rules=[f"TOOL_MAP:{pattern}"],
                     reason=f"工具 {tool_name} 映射为 {complexity.value}",
                     latency_ms=time.monotonic() - start,
                 )
 
-    # ── 2. Token count 强信号 ─────────────────────────────────────────────
-    if tokens >= _TOKEN_COUNT_LIKELY_COMPLEX_MIN:
-        return _make_decision(
-            Complexity.COMPLEX,
-            confidence=0.95,
-            primary_signal=f"token_count:{tokens}",
-            matched_rules=[f"COMPLEX_BY_TOKENS({tokens}>={_TOKEN_COUNT_LIKELY_COMPLEX_MIN})"],
-            reason=f"输入过长（≈{tokens} tokens），推断为复杂任务",
-            latency_ms=time.monotonic() - start,
-        )
+    # ── 启发式规则判断 ──────────────────────────────────────────────────
+    q_lower = query.lower()
 
-    # ── 3.5. 短输入特殊处理：防止「帮我+写/创建」被误判 ─────────────────────
-    if tokens <= _TOKEN_COUNT_SIMPLE_MAX:
-        # 跳过以 # 前缀开头的查询（话题标签/提及等，不应作为复杂度判断依据）
-        query_stripped = query.lstrip()
-        if query_stripped.startswith("#"):
-            # 标签类输入：查询标签内容本身属于 simple
-            return _make_decision(
-                Complexity.SIMPLE,
-                confidence=0.82,
-                primary_signal="hashtag_input",
-                matched_rules=["HASHTAG_PREFIX"],
-                reason="标签类输入（#开头），判定为简单任务",
-                latency_ms=time.monotonic() - start,
-            )
-
-        # 「帮我 + 写/创建类动词」→ 强制 complex
-        writing_intent = any(
-            f"{prefix}{action}" in query
-            for prefix in ["帮我", "请帮我", "我想"]
-            for action in ["写", "写个", "创建一个", "写段", "写代码", "写个"]
-        )
-        if writing_intent:
-            matched_complex = [kw for kw in _COMPLEX_KEYWORDS if kw in query_lower]
+    # 先检查 complex 规则（优先级高）
+    for pat in _COMPLEX_PATTERNS:
+        if re.search(pat, q_lower):
             return _make_decision(
                 Complexity.COMPLEX,
-                confidence=0.85,
-                primary_signal="short_input_writing_intent",
-                matched_rules=[f"WRITING_INTENT:{matched_complex}"],
-                reason="短输入含「帮我+写/创建」意图，判定为复杂任务",
+                primary_signal="heuristic_complex",
+                matched_rules=[pat],
+                reason=f"命中复杂规则 [{pat}]",
                 latency_ms=time.monotonic() - start,
             )
 
-        # 短输入先倾向 simple，再看关键词
-        simple_kw_count = sum(1 for kw in _SIMPLE_KEYWORDS if kw in query_lower)
-        complex_kw_count = sum(1 for kw in _COMPLEX_KEYWORDS if kw in query_lower)
-        if simple_kw_count > complex_kw_count:
+    # 再检查 simple 规则
+    for pat in _SIMPLE_PATTERNS:
+        if re.search(pat, q_lower):
             return _make_decision(
                 Complexity.SIMPLE,
-                confidence=0.75,
-                primary_signal=f"token_count:{tokens}",
-                matched_rules=[f"SIMPLE_BY_TOKENS_AND_KEYWORDS(simple={simple_kw_count},complex={complex_kw_count})"],
-                reason=f"短输入（≈{tokens} tokens），简单关键词多",
+                primary_signal="heuristic_simple",
+                matched_rules=[pat],
+                reason=f"命中简单规则 [{pat}]",
                 latency_ms=time.monotonic() - start,
             )
 
-    # ── 3. 关键词计数 ────────────────────────────────────────────────────
-    matched_simple = [kw for kw in _SIMPLE_KEYWORDS if kw in query_lower]
-    matched_complex = [kw for kw in _COMPLEX_KEYWORDS if kw in query_lower]
-
-    complex_score = len(matched_complex)
-    simple_score = len(matched_simple)
-
-    # 权重：complex 关键词命中权重更高
-    # 1 个 complex 关键词 ≈ 2 个 simple 关键词
-    weighted_complex = complex_score * 2.0
-    weighted_simple = simple_score * 1.0
-
-    if weighted_complex > weighted_simple:
-        confidence = min(0.5 + (weighted_complex - weighted_simple) * 0.1, 0.95)
-        return _make_decision(
-            Complexity.COMPLEX,
-            confidence=confidence,
-            primary_signal="keyword_analysis",
-            matched_rules=[f"COMPLEX_KEYWORDS:{matched_complex}", f"SIMPLE_KEYWORDS:{matched_simple}"],
-            reason=f"复杂关键词命中（{'/'.join(matched_complex[:3])}），推断为复杂任务",
-            latency_ms=time.monotonic() - start,
-        )
-    elif weighted_simple > weighted_complex:
-        confidence = min(0.5 + (weighted_simple - weighted_complex) * 0.15, 0.85)
-        return _make_decision(
-            Complexity.SIMPLE,
-            confidence=confidence,
-            primary_signal="keyword_analysis",
-            matched_rules=[f"SIMPLE_KEYWORDS:{matched_simple}", f"COMPLEX_KEYWORDS:{matched_complex}"],
-            reason=f"简单关键词命中（{'/'.join(matched_simple[:3])}），推断为简单任务",
-            latency_ms=time.monotonic() - start,
-        )
-
-    # ── 4. 默认策略 ────────────────────────────────────────────────────────
-    # 两者差不多或都没命中，按 simple 处理（节省成本）
-    preliminary = _make_decision(
-        Complexity.SIMPLE,
-        confidence=0.6,
-        primary_signal="default_fallback",
-        matched_rules=["DEFAULT_SIMPLE_FALLBACK"],
-        reason="无法明确分类，默认路由到简单模型（可手动指定覆盖）",
-        latency_ms=time.monotonic() - start,
+    # ── 无规则匹配 → 触发 LLM 仲裁 ──────────────────────────────────────
+    # 启发式规则未命中，交给 MiniMax 高速版二次判断
+    latency_ms = (time.monotonic() - start) * 1000
+    complexity, reason = _arbitrate_with_minimax(query)
+    return _make_decision(
+        complexity,
+        primary_signal="llm_arbiter",
+        matched_rules=["ARBITRATION"],
+        reason=reason,
+        latency_ms=latency_ms,
     )
-
-    # ── 5. 低置信度仲裁 ────────────────────────────────────────────────────
-    # 当启发式分类置信度不足时，调用 MiniMax 高速版二次判断
-    if preliminary.confidence < _ARBITRATION_CONFIDENCE_THRESHOLD:
-        arb_complexity, arb_reason = _arbitrate_with_minimax(query)
-        arb_confidence = 0.82  # 仲裁后的置信度固定为 0.82
-        return _make_decision(
-            arb_complexity,
-            confidence=arb_confidence,
-            primary_signal="minimax_arbitration",
-            matched_rules=["ARBITRATION_TRIGGERED"] + preliminary.matched_rules,
-            reason=arb_reason,
-            latency_ms=time.monotonic() - start,
-        )
-
-    return preliminary
 
 
 # ---------------------------------------------------------------------------
@@ -516,7 +453,6 @@ def classify_terminal_content(command: str) -> RouteDecision:
     if matched_complex:
         return _make_decision(
             Complexity.COMPLEX,
-            confidence=0.9,
             primary_signal=f"terminal_command:{matched_complex[0]}",
             matched_rules=[f"COMPLEX_CMD:{matched_complex}"],
             reason=f"终端命令推断为复杂（{matched_complex[0]}）",
@@ -525,7 +461,6 @@ def classify_terminal_content(command: str) -> RouteDecision:
     if matched_simple:
         return _make_decision(
             Complexity.SIMPLE,
-            confidence=0.85,
             primary_signal=f"terminal_command:{matched_simple[0]}",
             matched_rules=[f"SIMPLE_CMD:{matched_simple}"],
             reason=f"终端命令推断为简单（{matched_simple[0]}）",
@@ -535,7 +470,6 @@ def classify_terminal_content(command: str) -> RouteDecision:
     # 其他命令默认 simple
     return _make_decision(
         Complexity.SIMPLE,
-        confidence=0.6,
         primary_signal="terminal_default",
         matched_rules=["TERMINAL_DEFAULT_SIMPLE"],
         reason="终端命令无法明确分类，默认简单",
@@ -587,7 +521,6 @@ def record_routing_event(
         timestamp=time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
         query=query[:500],  # 截断防止过大
         complexity=decision.complexity.value,
-        confidence=decision.confidence,
         primary_signal=decision.primary_signal,
         matched_rules=decision.matched_rules,
         suggested_model=decision.suggested_model,
@@ -648,7 +581,6 @@ def classify(
     # Publish routing context for web providers to read
     set_current_routing_context({
         "complexity": decision.complexity.value,
-        "confidence": decision.confidence,
         "primary_signal": decision.primary_signal,
         "reason": decision.reason,
     })
@@ -675,7 +607,6 @@ def get_model_for_task(
             provider, model = "user_specified", user_override
         decision = RouteDecision(
             complexity=Complexity.UNKNOWN,
-            confidence=1.0,
             primary_signal="user_override",
             matched_rules=[],
             suggested_model=model,
@@ -849,6 +780,6 @@ if __name__ == "__main__":
     print("\n=== Task Complexity Router 测试 ===\n")
     for q in test_queries:
         d = classify(q)
-        print(f"[{d.complexity.value:>12}] {d.confidence:.2f} | {d.suggested_provider}/{d.suggested_model} | {d.reason}")
+        print(f"[{d.complexity.value:>12}] {d.suggested_provider}/{d.suggested_model} | {d.reason}")
         print(f"            query: {q}")
         print()
