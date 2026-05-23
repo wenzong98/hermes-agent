@@ -107,3 +107,19 @@ def test_prompt_block_is_conditional_and_mentions_layered_policy():
     assert "web_extract" in prompt
     assert "Tavily" in prompt
     assert "AI summary" in prompt
+
+
+def test_tuple_handles_bytes_items():
+    """YAML configs may return bytes in tuples from field default_factory."""
+    from agent.adaptive_query_router import load_adaptive_query_routing_config
+
+    # Simulate bytes in the config tuple (can happen with certain YAML loaders)
+    cfg = load_adaptive_query_routing_config({
+        "adaptive_query_routing": {
+            "force_web_keywords": [b"latest", b"news", "price"],
+        }
+    })
+    # Should not raise; bytes should be decoded to strings
+    assert "latest" in cfg.force_web_keywords
+    assert "news" in cfg.force_web_keywords
+    assert "price" in cfg.force_web_keywords

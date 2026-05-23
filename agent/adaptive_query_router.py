@@ -25,13 +25,11 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 # --------------------------------------------------------------------------- #
-# Buffered JSONL writer — module state
+# JSONL writer — thread-safe, zero-buffer, fsync on every write
 # --------------------------------------------------------------------------- #
 
-_buf = []       # list[dict]
-_buf_lock = threading.Lock()
 _persist_path = str(Path.home() / ".hermes" / "adaptive_router_history.jsonl")
-_writer_on = False
+_persist_lock = threading.Lock()
 
 
 def set_persistence_path(p: str) -> None:
@@ -40,12 +38,15 @@ def set_persistence_path(p: str) -> None:
 
 
 def _write(ev: dict) -> None:
-    with _buf_lock:
+    """Thread-safe direct write with fsync — no buffering, no data loss."""
+    with _persist_lock:
         p = Path(os.path.expanduser(_persist_path))
         p.parent.mkdir(parents=True, exist_ok=True)
         try:
             with open(p, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
         except Exception:
             pass
 
@@ -157,7 +158,12 @@ if not _HAS_PKG:
     def _tuple(v, default):
         if not v: return tuple(default)
         if isinstance(v, str): return (v,)
-        return tuple(x.strip() for x in v if isinstance(x, str) and x.strip()) or tuple(default)
+        if isinstance(v, bytes): return (v.decode("utf-8", errors="replace"),)
+        return tuple(
+            x.decode("utf-8", errors="replace") if isinstance(x, bytes) else x.strip()
+            for x in v
+            if bool(x.strip() if isinstance(x, str) else x)
+        ) or tuple(default)
 
     def _cfg_section(cfg):
         direct = cfg.get("adaptive_query_routing")
@@ -172,7 +178,13 @@ if not _HAS_PKG:
             try:
                 from hermes_cli.config import load_config
                 cfg = load_config() or {}
-            except: cfg = {}
+            except Exception as _exc:
+                import logging as _log
+                _log.warning(
+                    "[adaptive_query_router] failed to load config (using defaults): %s",
+                    _exc,
+                )
+                cfg = {}
         sec = _cfg_section(cfg if isinstance(cfg, Mapping) else {})
         dc = _DEF_CFG
         ta = sec.get("tavily_answer", dc.tavily_answer)
@@ -210,6 +222,7 @@ if not _HAS_PKG:
         return QueryRoute(ds, cx, strat, round(min(max(conf, 0.0), 1.0), 2), reason)
 
     def _classify_fallback(query, config=None, *, available_tools=None):
+        t0 = _time.perf_counter()
         cfg = config or load_adaptive_query_routing_config()
         tools = _tools(available_tools)
         text = (query or "").strip()
@@ -248,14 +261,10 @@ if not _HAS_PKG:
             else:
                 r = _route("direct","intermediate","none","no external-data signal",0.7)
 
+        elapsed = (_time.perf_counter() - t0) * 1000 if t0 else 0.0
         _write(_event(query, r.datasource, r.complexity, r.retrieval_strategy,
-                      r.confidence, r.reason, 0.05))
+                      r.confidence, r.reason, elapsed))
         return r
-
-
-# --------------------------------------------------------------------------- #
-# Public classify_query
-# --------------------------------------------------------------------------- #
 
 if _HAS_PKG:
     def classify_query(query, config=None, *, available_tools=None):
