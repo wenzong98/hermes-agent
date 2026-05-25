@@ -95,6 +95,67 @@ class TestGatewayEmptyModelFallback:
         # Can't fill in a default without knowing the provider
         assert model == ""
 
+    def test_platform_model_override_beats_global_gateway_model(self):
+        """Gateway platform.<name>.model should override top-level model/provider."""
+        from gateway.run import GatewayRunner
+        from gateway.session import SessionSource
+        from gateway.config import Platform
+
+        runner = object.__new__(GatewayRunner)
+        runner._session_model_overrides = {}
+
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="c1",
+            chat_type="dm",
+            user_id="u1",
+            user_name="tester",
+        )
+        user_config = {
+            "model": {
+                "default": "gpt-5.4",
+                "provider": "openai-codex",
+                "base_url": "",
+            },
+            "platform": {
+                "telegram": {
+                    "model": {
+                        "default": "MiniMax-M2.7-highspeed",
+                        "provider": "minimax",
+                        "base_url": "https://api.minimaxi.com/anthropic",
+                    }
+                }
+            },
+        }
+
+        with patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value={
+                "provider": "minimax",
+                "api_key": "test-key",
+                "base_url": "https://api.minimaxi.com/anthropic",
+                "api_mode": "anthropic_messages",
+            },
+        ) as mock_platform_runtime, patch(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            side_effect=AssertionError("platform runtime should be used instead of global runtime"),
+        ):
+            model, kwargs = runner._resolve_session_agent_runtime(
+                source=source,
+                user_config=user_config,
+            )
+
+        assert model == "MiniMax-M2.7-highspeed"
+        assert kwargs["provider"] == "minimax"
+        assert kwargs["base_url"] == "https://api.minimaxi.com/anthropic"
+        assert kwargs["api_mode"] == "anthropic_messages"
+        mock_platform_runtime.assert_called_once_with(
+            requested="minimax",
+            explicit_api_key=None,
+            explicit_base_url="https://api.minimaxi.com/anthropic",
+            target_model="MiniMax-M2.7-highspeed",
+        )
+
 
 class TestResolveGatewayModel:
     """Test _resolve_gateway_model reads model from config correctly."""

@@ -297,6 +297,55 @@ class Mem0MemoryProvider(MemoryProvider):
             return response
         return []
 
+    def _local_get_all_memories(self) -> list[dict[str, Any]]:
+        """Read all local-mode memories directly from Chroma.
+
+        Mem0's ``get_all`` defaults to ``top_k=20``, which truncates larger
+        memory sets. Reading from the underlying collection preserves the full
+        set for profile dumps.
+        """
+        memory = self._get_local_memory()
+        collection = memory.vector_store.collection
+        raw = collection.get(where=self._read_filters(), include=["metadatas"])
+        results = []
+        for meta in raw.get("metadatas", []) or []:
+            if not meta:
+                continue
+            text = meta.get("data") or meta.get("memory") or ""
+            if not text:
+                continue
+            results.append({"memory": text})
+        return results
+
+    def _local_semantic_search(self, query: str, top_k: int) -> list[dict[str, Any]]:
+        """Run local semantic search directly against Chroma using the configured embedder.
+
+        The Mem0 local ``search()`` path currently produces poor rankings for
+        this setup even when the stored embeddings are good. Querying Chroma
+        directly with the same embedder yields correct nearest neighbours.
+        """
+        memory = self._get_local_memory()
+        embedding = memory.embedding_model.embed(query, memory_action="search")
+        raw = memory.vector_store.collection.query(
+            query_embeddings=[[float(x) for x in embedding]],
+            n_results=top_k,
+            where=self._read_filters(),
+            include=["metadatas", "distances"],
+        )
+
+        metadatas = (raw.get("metadatas") or [[]])[0]
+        distances = (raw.get("distances") or [[]])[0]
+        results = []
+        for meta, distance in zip(metadatas, distances):
+            if not meta:
+                continue
+            text = meta.get("data") or meta.get("memory") or ""
+            if not text:
+                continue
+            score = 0.0 if distance is None else max(0.0, 1.0 - float(distance))
+            results.append({"memory": text, "score": score})
+        return results
+
     def system_prompt_block(self) -> str:
         backend = "local" if self._local_mode else "cloud"
         return (
@@ -386,7 +435,11 @@ class Mem0MemoryProvider(MemoryProvider):
 
         if tool_name == "mem0_profile":
             try:
-                memories = self._unwrap_results(client.get_all(filters=self._read_filters()))
+                memories = (
+                    self._local_get_all_memories()
+                    if self._local_mode
+                    else self._unwrap_results(client.get_all(filters=self._read_filters()))
+                )
                 self._record_success()
                 if not memories:
                     return json.dumps({"result": "No memories stored yet."})
@@ -403,12 +456,16 @@ class Mem0MemoryProvider(MemoryProvider):
             rerank = args.get("rerank", False)
             top_k = min(int(args.get("top_k", 10)), 50)
             try:
-                results = self._unwrap_results(
-                    client.search(
-                        query=query,
-                        filters=self._read_filters(),
-                        rerank=rerank,
-                        top_k=top_k,
+                results = (
+                    self._local_semantic_search(query=query, top_k=top_k)
+                    if self._local_mode
+                    else self._unwrap_results(
+                        client.search(
+                            query=query,
+                            filters=self._read_filters(),
+                            rerank=rerank,
+                            top_k=top_k,
+                        )
                     )
                 )
                 self._record_success()
