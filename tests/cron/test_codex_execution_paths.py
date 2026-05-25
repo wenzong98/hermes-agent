@@ -71,6 +71,7 @@ class _Codex401ThenSuccessAgent(run_agent.AIAgent):
         kwargs.setdefault("max_iterations", 4)
         type(self).last_init = dict(kwargs)
         super().__init__(*args, **kwargs)
+        self._task_complexity_router_disabled = True
         self._cleanup_task_resources = lambda task_id: None
         self._persist_session = lambda messages, history=None: None
         self._save_trajectory = lambda messages, user_message, completed: None

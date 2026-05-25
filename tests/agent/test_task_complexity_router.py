@@ -32,6 +32,7 @@ from agent.task_complexity_router import (
     get_model_for_task,
     resolve_effective_model_route,
     _resolve_complexity,
+    _resolve_runtime_route_target,
 )
 
 
@@ -233,6 +234,12 @@ def test_configure_from_dict_overrides_model_tiers():
         configure_from_dict({})
 
 
+def test_openai_route_targets_codex_runtime():
+    provider, model = _resolve_runtime_route_target("openai", "openai/gpt-5.4")
+    assert provider == "openai-codex"
+    assert model == "openai/gpt-5.4"
+
+
 def test_ensure_router_config_loaded_applies_config_once():
     ensure_router_config_loaded({
         "task_complexity_router": {
@@ -246,16 +253,21 @@ def test_ensure_router_config_loaded_applies_config_once():
 
 
 def test_activate_effective_route_updates_primary_runtime(monkeypatch):
+    captured = {}
+
     class MockClient:
-        _base_url = "https://api.openai.com/v1"
-        base_url = "https://api.openai.com/v1"
+        _base_url = "https://chatgpt.com/backend-api/codex"
+        base_url = "https://chatgpt.com/backend-api/codex"
         api_key = "sk-test"
 
+    def _resolve_provider_client(provider, model=None, raw_codex=False):
+        captured["provider"] = provider
+        captured["model"] = model
+        captured["raw_codex"] = raw_codex
+        return MockClient(), model or "gpt-5.4"
+
     fake_aux = types.SimpleNamespace(
-        resolve_provider_client=lambda provider, model=None, raw_codex=False: (
-            MockClient(),
-            model or "gpt-5.4",
-        )
+        resolve_provider_client=_resolve_provider_client
     )
     monkeypatch.setitem(sys.modules, "agent.auxiliary_client", fake_aux)
 
@@ -278,10 +290,17 @@ def test_activate_effective_route_updates_primary_runtime(monkeypatch):
 
     changed = activate_effective_route(agent, route)
     assert changed is True
-    assert agent.provider == "openai"
+    assert captured == {
+        "provider": "openai-codex",
+        "model": "gpt-5.4",
+        "raw_codex": False,
+    }
+    assert agent.provider == "openai-codex"
     assert agent.model == "gpt-5.4"
-    assert agent._primary_runtime["provider"] == "openai"
+    assert agent.api_mode == "codex_responses"
+    assert agent._primary_runtime["provider"] == "openai-codex"
     assert agent._primary_runtime["model"] == "gpt-5.4"
+    assert agent._primary_runtime["api_mode"] == "codex_responses"
     assert agent._fallback_activated is False
     assert agent._fallback_index == 0
 

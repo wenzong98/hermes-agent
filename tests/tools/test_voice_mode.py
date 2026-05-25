@@ -258,7 +258,10 @@ class TestCheckVoiceRequirements:
         monkeypatch.setattr("tools.voice_mode._termux_microphone_command", lambda: "/data/data/com.termux/files/usr/bin/termux-microphone-record")
         monkeypatch.setattr("tools.voice_mode._termux_api_app_installed", lambda: True)
         monkeypatch.setattr("tools.voice_mode.detect_audio_environment", lambda: {"available": True, "warnings": [], "notices": ["Termux:API microphone recording available"]})
-        monkeypatch.setattr("tools.transcription_tools._get_provider", lambda cfg: "openai")
+        monkeypatch.setattr(
+            "tools.transcription_tools._get_provider",
+            lambda cfg, **kwargs: "openai",
+        )
 
         from tools.voice_mode import check_voice_requirements
         result = check_voice_requirements()
@@ -272,7 +275,10 @@ class TestCheckVoiceRequirements:
         monkeypatch.setattr("tools.voice_mode._audio_available", lambda: True)
         monkeypatch.setattr("tools.voice_mode.detect_audio_environment",
                             lambda: {"available": True, "warnings": []})
-        monkeypatch.setattr("tools.transcription_tools._get_provider", lambda cfg: "openai")
+        monkeypatch.setattr(
+            "tools.transcription_tools._get_provider",
+            lambda cfg, **kwargs: "openai",
+        )
 
         from tools.voice_mode import check_voice_requirements
 
@@ -287,6 +293,13 @@ class TestCheckVoiceRequirements:
         monkeypatch.setattr("tools.voice_mode.detect_audio_environment",
                             lambda: {"available": False, "warnings": ["Audio libraries not installed"]})
         monkeypatch.setenv("VOICE_TOOLS_OPENAI_KEY", "sk-test-key")
+        monkeypatch.setattr("tools.transcription_tools._HAS_FASTER_WHISPER", False)
+        monkeypatch.setattr("tools.transcription_tools._HAS_OPENAI", True)
+        monkeypatch.setattr("tools.transcription_tools._has_local_command", lambda: False)
+        monkeypatch.setattr(
+            "tools.transcription_tools._try_lazy_install_stt",
+            lambda: (_ for _ in ()).throw(AssertionError("requirements check should not lazy-install STT")),
+        )
 
         from tools.voice_mode import check_voice_requirements
 
@@ -300,7 +313,10 @@ class TestCheckVoiceRequirements:
         monkeypatch.setattr("tools.voice_mode._audio_available", lambda: True)
         monkeypatch.setattr("tools.voice_mode.detect_audio_environment",
                             lambda: {"available": True, "warnings": []})
-        monkeypatch.setattr("tools.transcription_tools._get_provider", lambda cfg: "none")
+        monkeypatch.setattr(
+            "tools.transcription_tools._get_provider",
+            lambda cfg, **kwargs: "none",
+        )
 
         from tools.voice_mode import check_voice_requirements
 

@@ -526,13 +526,14 @@ class TestPatternKeyUniqueness:
         _, key_exec, _ = detect_dangerous_command("find . -exec rm {} \\;")
         _, key_delete, _ = detect_dangerous_command("find . -name '*.tmp' -delete")
         session = "test_find_collision"
-        _clear_session(session)
-        approve_session(session, key_exec)
-        assert is_approved(session, key_exec) is True
-        assert is_approved(session, key_delete) is False, (
-            "approving find -exec rm should not auto-approve find -delete"
-        )
-        _clear_session(session)
+        with mock_patch.object(approval_module, "_permanent_approved", set()):
+            _clear_session(session)
+            approve_session(session, key_exec)
+            assert is_approved(session, key_exec) is True
+            assert is_approved(session, key_delete) is False, (
+                "approving find -exec rm should not auto-approve find -delete"
+            )
+            _clear_session(session)
 
     def test_legacy_find_key_still_approves_find_exec(self):
         """Old allowlist entry 'find' should keep approving the matching command."""

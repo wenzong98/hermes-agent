@@ -922,8 +922,12 @@ def _run_doctor_with_healthy_oauth_fallback(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_BASE_URL", raising=False)
     monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
     monkeypatch.delenv("MINIMAX_CN_API_KEY", raising=False)
+    monkeypatch.delenv("MINIMAX_BASE_URL", raising=False)
+    monkeypatch.delenv("MINIMAX_CN_BASE_URL", raising=False)
+    monkeypatch.delenv("XAI_BASE_URL", raising=False)
     monkeypatch.setenv(env_key, bad_key)
 
     fake_model_tools = types.SimpleNamespace(

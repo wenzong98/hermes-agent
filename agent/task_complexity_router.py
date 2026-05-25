@@ -33,6 +33,7 @@ from dataclasses import dataclass, asdict
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -822,6 +823,50 @@ def configure_from_dict(config: dict) -> None:
     _CONFIGURED = True
 
 
+def _resolve_runtime_route_target(provider: str, model: str) -> tuple[str, str]:
+    """Map router-facing provider labels to executable runtime targets.
+
+    The task router may surface human-friendly OpenAI selections like
+    ``provider="openai"`` + ``model="gpt-5.4"`` or ``openai/gpt-5.4``.
+    Hermes does not have a first-class native ``openai`` runtime provider for
+    the main agent path; OpenAI-family models run through the Codex runtime.
+    """
+    normalized_provider = (provider or "").strip().lower()
+    normalized_model = (model or "").strip()
+    if normalized_provider == "openai":
+        return "openai-codex", normalized_model
+    return normalized_provider or (provider or "").strip(), normalized_model
+
+
+def _detect_runtime_api_mode(provider: str, base_url: str = "") -> str:
+    """Infer the wire protocol used by the activated runtime."""
+    normalized_provider = (provider or "").strip().lower()
+    normalized_base = (base_url or "").strip().rstrip("/")
+    hostname = ""
+    if normalized_base:
+        try:
+            hostname = (urlparse(normalized_base).hostname or "").lower()
+        except Exception:
+            hostname = ""
+
+    if normalized_provider in {"openai-codex", "xai", "xai-oauth", "copilot-acp"}:
+        return "codex_responses"
+    if normalized_provider == "bedrock" or (
+        hostname.startswith("bedrock-runtime.") and normalized_base.endswith("amazonaws.com")
+    ):
+        return "bedrock_converse"
+    if (
+        normalized_provider == "anthropic"
+        or normalized_base.lower().endswith("/anthropic")
+        or "api.anthropic.com" in normalized_base.lower()
+        or ("api.kimi.com" in normalized_base.lower() and "/coding" in normalized_base.lower())
+    ):
+        return "anthropic_messages"
+    if hostname == "api.openai.com":
+        return "codex_responses"
+    return "chat_completions"
+
+
 def _apply_model_route(
     agent,
     provider: str,
@@ -831,8 +876,12 @@ def _apply_model_route(
     source: str,
 ) -> bool:
     """Apply a resolved route to the agent and persist it as the new primary runtime."""
-    new_provider = (provider or getattr(agent, "provider", "") or "").strip()
-    new_model = (model or getattr(agent, "model", "") or "").strip()
+    requested_provider = (provider or getattr(agent, "provider", "") or "").strip()
+    requested_model = (model or getattr(agent, "model", "") or "").strip()
+    new_provider, new_model = _resolve_runtime_route_target(
+        requested_provider,
+        requested_model,
+    )
     if not new_provider or not new_model:
         return False
 
@@ -862,6 +911,7 @@ def _apply_model_route(
         # 获取 base_url 和 api_key
         base_url = getattr(new_client, "_base_url", None) or getattr(new_client, "base_url", None) or ""
         agent.base_url = str(base_url)
+        agent.api_mode = _detect_runtime_api_mode(new_provider, agent.base_url)
 
         # api_key 可能存在 client 或其 config 中
         api_key = ""
@@ -912,8 +962,8 @@ def _apply_model_route(
         agent._cached_system_prompt = None
 
         logging.info(
-            "[TaskComplexityRouter] 模型切换: source=%s provider=%s model=%s reason=%s",
-            source, new_provider, agent.model, reason,
+            "[TaskComplexityRouter] 模型切换: source=%s provider=%s model=%s reason=%s requested_provider=%s",
+            source, new_provider, agent.model, reason, requested_provider or new_provider,
         )
         return True
 
