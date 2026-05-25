@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 import gateway.run as gateway_run
+import hermes_cli.commands as cli_commands
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionSource
@@ -34,6 +35,7 @@ def _make_runner():
     runner._prefill_messages = []
     runner._reasoning_config = None
     runner._session_reasoning_overrides = {}
+    runner._session_router_overrides = {}
     runner._show_reasoning = False
     runner._provider_routing = {}
     runner._fallback_model = None
@@ -50,9 +52,11 @@ class _CapturingAgent:
     """Fake agent that records init kwargs for assertions."""
 
     last_init = None
+    last_instance = None
 
     def __init__(self, *args, **kwargs):
         type(self).last_init = dict(kwargs)
+        type(self).last_instance = self
         self.tools = []
 
     def run_conversation(self, user_message: str, conversation_history=None, task_id=None):
@@ -61,6 +65,14 @@ class _CapturingAgent:
             "messages": [],
             "api_calls": 1,
         }
+
+
+def _configure_router_home(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(cli_commands, "_router_disabled_cache", None)
+    return hermes_home
 
 
 class TestReasoningCommand:
@@ -298,6 +310,198 @@ class TestReasoningCommand:
         assert result["final_response"] == "ok"
         assert _CapturingAgent.last_init is not None
         assert _CapturingAgent.last_init["reasoning_config"] == {"enabled": True, "effort": "high"}
+
+
+class TestRouterCommand:
+    def test_parse_router_command_args_accepts_ascii_and_smart_global_flags(self):
+        assert gateway_run.GatewayRunner._parse_router_command_args("off --global") == ("off", True)
+        assert gateway_run.GatewayRunner._parse_router_command_args("—global on") == ("on", True)
+
+    @pytest.mark.asyncio
+    async def test_handle_router_command_defaults_to_session_only(self, tmp_path, monkeypatch):
+        hermes_home = _configure_router_home(tmp_path, monkeypatch)
+        (hermes_home / "config.yaml").write_text("", encoding="utf-8")
+
+        runner = _make_runner()
+        event = _make_event("/router off")
+        session_key = runner._session_key_for_source(event.source)
+
+        result = await runner._handle_router_command(event)
+
+        saved = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8")) or {}
+        assert saved.get("task_complexity_router_disabled", False) is False
+        assert runner._session_router_overrides[session_key] is True
+        assert "session only" in result
+
+    @pytest.mark.asyncio
+    async def test_router_global_clears_existing_session_override(self, tmp_path, monkeypatch):
+        hermes_home = _configure_router_home(tmp_path, monkeypatch)
+        (hermes_home / "config.yaml").write_text("", encoding="utf-8")
+
+        runner = _make_runner()
+        event = _make_event("/router off --global")
+        session_key = runner._session_key_for_source(event.source)
+        runner._session_router_overrides[session_key] = False
+
+        result = await runner._handle_router_command(event)
+
+        saved = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
+        assert saved["task_complexity_router_disabled"] is True
+        assert session_key not in runner._session_router_overrides
+        assert "saved to config" in result
+
+    @pytest.mark.asyncio
+    async def test_router_reset_clears_session_override_without_config_write(self, tmp_path, monkeypatch):
+        hermes_home = _configure_router_home(tmp_path, monkeypatch)
+        (hermes_home / "config.yaml").write_text("task_complexity_router_disabled: false\n", encoding="utf-8")
+
+        runner = _make_runner()
+        event = _make_event("/router reset")
+        session_key = runner._session_key_for_source(event.source)
+        runner._session_router_overrides[session_key] = True
+
+        result = await runner._handle_router_command(event)
+
+        saved = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
+        assert saved["task_complexity_router_disabled"] is False
+        assert session_key not in runner._session_router_overrides
+        assert "override cleared" in result
+
+    def test_resolve_session_router_prefers_session_override(self, tmp_path, monkeypatch):
+        _configure_router_home(tmp_path, monkeypatch)
+        monkeypatch.setattr(cli_commands, "_router_disabled", lambda value=None: False)
+
+        runner = _make_runner()
+        source = _make_event("/router").source
+        session_key = runner._session_key_for_source(source)
+        runner._session_router_overrides[session_key] = True
+
+        assert runner._resolve_session_router_disabled(source=source) is True
+
+    def test_router_session_override_isolated_by_topic_session_key(self, tmp_path, monkeypatch):
+        _configure_router_home(tmp_path, monkeypatch)
+        monkeypatch.setattr(cli_commands, "_router_disabled", lambda value=None: False)
+
+        runner = _make_runner()
+        source_a = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="chat-1",
+            chat_type="group",
+            user_id="user-1",
+            thread_id="topic-a",
+        )
+        source_b = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="chat-1",
+            chat_type="group",
+            user_id="user-1",
+            thread_id="topic-b",
+        )
+        session_key_a = runner._session_key_for_source(source_a)
+        session_key_b = runner._session_key_for_source(source_b)
+        runner._session_router_overrides[session_key_a] = True
+
+        assert session_key_a != session_key_b
+        assert runner._resolve_session_router_disabled(source=source_a) is True
+        assert runner._resolve_session_router_disabled(source=source_b) is False
+
+    def test_run_agent_reloads_router_state_per_message(self, tmp_path, monkeypatch):
+        hermes_home = _configure_router_home(tmp_path, monkeypatch)
+        (hermes_home / "config.yaml").write_text("task_complexity_router_disabled: true\n", encoding="utf-8")
+
+        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        monkeypatch.setattr(gateway_run, "_env_path", hermes_home / ".env")
+        monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            gateway_run,
+            "_resolve_runtime_agent_kwargs",
+            lambda: {
+                "provider": "openrouter",
+                "api_mode": "chat_completions",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "test-key",
+            },
+        )
+        fake_run_agent = types.ModuleType("run_agent")
+        fake_run_agent.AIAgent = _CapturingAgent
+        monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+        _CapturingAgent.last_init = None
+        _CapturingAgent.last_instance = None
+        runner = _make_runner()
+
+        source = SessionSource(
+            platform=Platform.LOCAL,
+            chat_id="cli",
+            chat_name="CLI",
+            chat_type="dm",
+            user_id="user-1",
+        )
+
+        result = asyncio.run(
+            runner._run_agent(
+                message="ping",
+                context_prompt="",
+                history=[],
+                source=source,
+                session_id="session-1",
+                session_key="agent:main:local:dm",
+            )
+        )
+
+        assert result["final_response"] == "ok"
+        assert _CapturingAgent.last_instance is not None
+        assert _CapturingAgent.last_instance._task_complexity_router_disabled is True
+
+    def test_run_agent_prefers_session_router_override(self, tmp_path, monkeypatch):
+        hermes_home = _configure_router_home(tmp_path, monkeypatch)
+        (hermes_home / "config.yaml").write_text("task_complexity_router_disabled: false\n", encoding="utf-8")
+
+        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        monkeypatch.setattr(gateway_run, "_env_path", hermes_home / ".env")
+        monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            gateway_run,
+            "_resolve_runtime_agent_kwargs",
+            lambda: {
+                "provider": "openrouter",
+                "api_mode": "chat_completions",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "***",
+            },
+        )
+        fake_run_agent = types.ModuleType("run_agent")
+        fake_run_agent.AIAgent = _CapturingAgent
+        monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+        _CapturingAgent.last_init = None
+        _CapturingAgent.last_instance = None
+        runner = _make_runner()
+        session_key = "agent:main:local:dm"
+        runner._session_router_overrides[session_key] = True
+
+        source = SessionSource(
+            platform=Platform.LOCAL,
+            chat_id="cli",
+            chat_name="CLI",
+            chat_type="dm",
+            user_id="user-1",
+        )
+
+        result = asyncio.run(
+            runner._run_agent(
+                message="ping",
+                context_prompt="",
+                history=[],
+                source=source,
+                session_id="session-1",
+                session_key=session_key,
+            )
+        )
+
+        assert result["final_response"] == "ok"
+        assert _CapturingAgent.last_instance is not None
+        assert _CapturingAgent.last_instance._task_complexity_router_disabled is True
 
     def test_run_agent_includes_enabled_mcp_servers_in_gateway_toolsets(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes"
