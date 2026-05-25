@@ -512,7 +512,7 @@ def main():
             print(f"  Params: {r['best_params']}")
             print(f"  Sharpe: {ts['sharpe_ratio']} | CAGR: {ts['cagr']} | MaxDD: {ts['max_drawdown']} | Return: {ts['total_return']} vs B&H: {ts['benchmark_return']}")
             print()
-        with open("walk_forward_results.json", "w") as f:
+        with open("walk_forward_results.json", "w", encoding="utf-8") as f:
             json.dump(wf_results, f, indent=2, default=str)
         print("Saved to walk_forward_results.json")
         return
@@ -548,7 +548,7 @@ def main():
     print(f"  Final Value:     ${stats['benchmark_final_value']:,.2f}")
     print("=" * 60)
 
-    with open("backtest_results.json", "w") as f:
+    with open("backtest_results.json", "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2, default=str)
     print("\nResults saved to backtest_results.json")
 

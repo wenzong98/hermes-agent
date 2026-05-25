@@ -478,7 +478,7 @@ def main():
     print(f"  Final Value:     ${stats['benchmark_final_value']:,.2f}")
     print("=" * 60)
 
-    with open("backtest_results_v2.json", "w") as f:
+    with open("backtest_results_v2.json", "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2, default=str)
     print("\nResults saved to backtest_results_v2.json")
 

@@ -51,7 +51,7 @@ dependencies = [
   # Cron scheduler (built-in feature — scheduled cron/interval jobs use croniter).
   "croniter==6.0.0",
   # Deterministic adaptive query routing shared with the standalone router repo.
-  "hermes-adaptive-router==0.4.0",
+  "hermes-adaptive-router @ git+https://github.com/wenzong98/hermes-adaptive-router.git@ad65139e0f4e1190a831b19c40a8066af82d81cc",
   # Skills Hub (GitHub App JWT auth — optional, only needed for bot identity)
   "PyJWT[crypto]==2.12.1",  # CVE-2026-32597
   # Windows has no IANA tzdata shipped with the OS, so Python's ``zoneinfo``
