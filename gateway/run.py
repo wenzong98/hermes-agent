@@ -2339,6 +2339,31 @@ class GatewayRunner:
                 resolved_session_key = None
 
         model = _resolve_gateway_model(user_config)
+        platform_model_cfg = {}
+        platform_runtime_override = None
+        platform_key = None
+        if source is not None:
+            platform_key = _platform_config_key(source.platform)
+            platform_model_cfg = (
+                user_config.get("platform", {}).get(platform_key, {}).get("model", {})
+                if user_config else {}
+            )
+            if not isinstance(platform_model_cfg, dict):
+                platform_model_cfg = {}
+
+        # Platform-specific model config takes precedence for gateway sessions.
+        # This allows CLI and messaging platforms to use different defaults
+        # (e.g. CLI -> gpt-5.4, Telegram -> MiniMax) without relying on
+        # session-scoped /model overrides.
+        if platform_model_cfg:
+            plat_model = platform_model_cfg.get("default") or platform_model_cfg.get("model") or ""
+            if plat_model:
+                logger.debug(
+                    "Platform model override: platform=%s model=%s (was %s)",
+                    platform_key, plat_model,
+                    model,
+                )
+                model = plat_model
         override = self._session_model_overrides.get(resolved_session_key) if resolved_session_key else None
         if override:
             override_model = override.get("model", model)
@@ -2368,7 +2393,39 @@ class GatewayRunner:
                 list(self._session_model_overrides.keys())[:5] if self._session_model_overrides else "[]",
             )
 
-        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        if not override and platform_model_cfg:
+            try:
+                from hermes_cli.runtime_provider import resolve_runtime_provider
+
+                platform_runtime = resolve_runtime_provider(
+                    requested=(platform_model_cfg.get("provider") or None),
+                    explicit_api_key=(platform_model_cfg.get("api_key") or None),
+                    explicit_base_url=(platform_model_cfg.get("base_url") or None),
+                    target_model=(model or None),
+                )
+                platform_runtime_override = {
+                    "api_key": platform_runtime.get("api_key"),
+                    "base_url": platform_runtime.get("base_url"),
+                    "provider": platform_runtime.get("provider"),
+                    "api_mode": platform_runtime.get("api_mode"),
+                    "command": platform_runtime.get("command"),
+                    "args": list(platform_runtime.get("args") or []),
+                    "credential_pool": platform_runtime.get("credential_pool"),
+                }
+                logger.debug(
+                    "Platform runtime override: platform=%s provider=%s model=%s",
+                    platform_key,
+                    platform_runtime_override.get("provider"),
+                    model,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Platform runtime override failed for platform=%s: %s",
+                    platform_key,
+                    exc,
+                )
+
+        runtime_kwargs = platform_runtime_override or _resolve_runtime_agent_kwargs()
         runtime_model = runtime_kwargs.pop("model", None)
         if runtime_model:
             logger.info(
