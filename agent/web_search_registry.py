@@ -14,14 +14,16 @@ The active provider is chosen by configuration with this precedence:
 1. ``web.search_backend`` / ``web.extract_backend`` / ``web.crawl_backend``
    (per-capability override).
 2. ``web.backend`` (shared fallback).
-3. If exactly one capability-eligible provider is registered AND available,
+3. Complex task routing — when the task complexity router flags this turn
+   as "complex", Tavily is preferred over other fallback choices.
+4. If exactly one capability-eligible provider is registered AND available,
    use it.
-4. Legacy preference order — ``firecrawl`` → ``parallel`` → ``tavily`` →
+5. Legacy preference order — ``firecrawl`` → ``parallel`` → ``tavily`` →
    ``exa`` → ``searxng`` → ``brave-free`` → ``ddgs`` — filtered by
    availability. Matches the historic ``tools.web_tools._get_backend()``
    candidate order so installs that never set a config key keep landing
    on the same provider they did before the plugin migration.
-5. Otherwise ``None`` — the tool surfaces a helpful error pointing at
+6. Otherwise ``None`` — the tool surfaces a helpful error pointing at
    ``hermes tools``.
 
 The capability filter (``supports_search`` / ``supports_extract`` /
@@ -143,10 +145,17 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
        routing somewhere else. Matches legacy
        :func:`tools.web_tools._get_backend` behavior for configured names.
 
-    2. **Single-provider shortcut.** When only one registered provider
+    2. **Complex task routing — prefer Tavily.** When the task complexity
+       router (:mod:`agent.task_complexity_router`) has flagged this turn
+       as ``"complex"`` and Tavily is registered, supports the capability,
+       and is available, return Tavily. This ensures complex tasks get
+       Tavily's automatic ``search_depth=advanced`` upgrade rather than
+       falling through to another provider or a MiniMax MCP web_search.
+
+    3. **Single-provider shortcut.** When only one registered provider
        supports *capability* AND ``is_available()`` reports True, return it.
 
-    3. **Legacy preference walk, filtered by availability.** Walk the
+    4. **Legacy preference walk, filtered by availability.** Walk the
        :data:`_LEGACY_PREFERENCE` order (firecrawl → parallel → tavily →
        exa → searxng → brave-free → ddgs) looking for a provider whose
        ``supports_<capability>()`` is True AND whose ``is_available()`` is
@@ -198,7 +207,29 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
                 configured, capability,
             )
 
-    # 2. + 3. Fallback path — filter by availability so we don't surface
+    # 2. Complex task routing — prefer Tavily over other fallback choices.
+    #    When the complexity router flags this turn as "complex" (model
+    #    quality improves with deeper search), Tavily's auto-upgrade to
+    #    search_depth=advanced gives better results than MiniMax MCP
+    #    web_search or other providers. This fires before the legacy
+    #    preference walk so complex tasks bypass the normal candidate order.
+    try:
+        from agent.task_complexity_router import get_current_routing_context
+
+        routing_ctx = get_current_routing_context()
+        complexity = routing_ctx.get("complexity", "")
+        if complexity in ("complex", "force_complex"):
+            tavily = snapshot.get("tavily")
+            if (
+                tavily is not None
+                and _capable(tavily)
+                and _is_available_safe(tavily)
+            ):
+                return tavily
+    except Exception:
+        pass
+
+    # 3. + 4. Fallback path — filter by availability so we don't surface
     #    a provider the user has no credentials for. Without this filter,
     #    a registered-but-unconfigured provider could end up "active" on
     #    a fresh install with no API keys at all.

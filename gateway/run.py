@@ -1646,7 +1646,6 @@ class GatewayRunner:
     _stop_task: Optional[asyncio.Task] = None
     _session_model_overrides: Dict[str, Dict[str, str]] = {}
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
-    _session_router_overrides: Dict[str, bool] = {}
 
     def __init__(self, config: Optional[GatewayConfig] = None):
         global _gateway_runner_ref
@@ -1735,9 +1734,6 @@ class GatewayRunner:
         # Per-session reasoning effort overrides from /reasoning.
         # Key: session_key, Value: parsed reasoning config dict.
         self._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
-        # Per-session router overrides from /router.
-        # Key: session_key, Value: router disabled flag.
-        self._session_router_overrides: Dict[str, bool] = {}
         self._kanban_notifier_profile = self._active_profile_name()
         # Teams meeting pipeline runtime (bound later when msgraph_webhook adapter exists).
         self._teams_pipeline_runtime = None
@@ -2842,28 +2838,6 @@ class GatewayRunner:
                 value_tokens.append(token)
         return " ".join(value_tokens).strip().lower(), persist_global
 
-    @staticmethod
-    def _parse_router_command_args(raw_args: str) -> tuple[str, bool]:
-        """Parse `/router` args into `(value, persist_global)`."""
-        import shlex
-
-        text = str(raw_args or "").strip().replace("—", "--")
-        if not text:
-            return "", False
-        try:
-            tokens = shlex.split(text)
-        except ValueError:
-            tokens = text.split()
-
-        persist_global = False
-        value_tokens = []
-        for token in tokens:
-            if token == "--global":
-                persist_global = True
-            else:
-                value_tokens.append(token)
-        return " ".join(value_tokens).strip().lower(), persist_global
-
     def _resolve_session_reasoning_config(
         self,
         *,
@@ -2897,42 +2871,6 @@ class GatewayRunner:
             self._session_reasoning_overrides.pop(session_key, None)
         else:
             self._session_reasoning_overrides[session_key] = dict(reasoning_config)
-
-    def _resolve_session_router_disabled(
-        self,
-        *,
-        source: Optional[SessionSource] = None,
-        session_key: Optional[str] = None,
-    ) -> bool:
-        """Resolve router disabled state for a session, honoring session overrides."""
-        from hermes_cli.commands import _router_disabled
-
-        resolved_session_key = session_key
-        if not resolved_session_key and source is not None:
-            try:
-                resolved_session_key = self._session_key_for_source(source)
-            except Exception:
-                resolved_session_key = None
-
-        overrides = getattr(self, "_session_router_overrides", {}) or {}
-        if resolved_session_key and resolved_session_key in overrides:
-            return bool(overrides[resolved_session_key])
-        return bool(_router_disabled())
-
-    def _set_session_router_override(
-        self,
-        session_key: str,
-        router_disabled: Optional[bool],
-    ) -> None:
-        """Set or clear the session-scoped router override."""
-        if not session_key:
-            return
-        if not hasattr(self, "_session_router_overrides"):
-            self._session_router_overrides = {}
-        if router_disabled is None:
-            self._session_router_overrides.pop(session_key, None)
-        else:
-            self._session_router_overrides[session_key] = bool(router_disabled)
 
     @staticmethod
     def _load_service_tier() -> str | None:
@@ -8127,11 +8065,10 @@ class GatewayRunner:
         if getattr(session_entry, "was_auto_reset", False):
             # Treat auto-reset as a full conversation boundary — drop every
             # session-scoped transient state so the fresh session does not
-            # inherit the previous conversation's model/reasoning/router overrides
+            # inherit the previous conversation's model/reasoning overrides
             # or a queued "/model switched" note.
             self._session_model_overrides.pop(session_key, None)
             self._set_session_reasoning_override(session_key, None)
-            self._set_session_router_override(session_key, None)
             if hasattr(self, "_pending_model_notes"):
                 self._pending_model_notes.pop(session_key, None)
         
@@ -8908,7 +8845,6 @@ class GatewayRunner:
                 self._evict_cached_agent(session_key)
                 self._session_model_overrides.pop(session_key, None)
                 self._set_session_reasoning_override(session_key, None)
-                self._set_session_router_override(session_key, None)
                 if hasattr(self, "_pending_model_notes"):
                     self._pending_model_notes.pop(session_key, None)
                 response = (response or "") + (
@@ -9286,11 +9222,10 @@ class GatewayRunner:
         # Reset the session
         new_entry = self.session_store.reset_session(session_key)
 
-        # Clear any session-scoped model/reasoning/router overrides so the next agent
+        # Clear any session-scoped model/reasoning overrides so the next agent
         # picks up configured defaults instead of previous session switches.
         self._session_model_overrides.pop(session_key, None)
         self._set_session_reasoning_override(session_key, None)
-        self._set_session_router_override(session_key, None)
         if hasattr(self, "_pending_model_notes"):
             self._pending_model_notes.pop(session_key, None)
 
@@ -12117,72 +12052,46 @@ class GatewayRunner:
         return t("gateway.footer.saved", state=state, example=example)
 
     async def _handle_router_command(self, event: MessageEvent) -> str:
-        """Handle /router command — manage task complexity router state.
+        """Handle /router command — toggle task complexity router.
 
         Usage:
-            /router                       Show current effective state
-            /router on                    Enable router for this session only
-            /router off                   Disable router for this session only
-            /router reset                 Clear this session override
-            /router on|off --global       Persist router state to config.yaml
-            /router status                Show current effective state
+            /router on   → enable router
+            /router off   → disable router
+            /router       → toggle
+            /router status → show current state
         """
         from hermes_cli.commands import _router_disabled
 
-        raw_args = event.get_command_args().strip()
-        arg, persist_global = self._parse_router_command_args(raw_args)
-        session_key = self._session_key_for_source(event.source)
-        current = self._resolve_session_router_disabled(
-            source=event.source,
-            session_key=session_key,
-        )
-        has_session_override = session_key in (getattr(self, "_session_router_overrides", {}) or {})
+        # Parse arg
+        arg = ""
+        try:
+            text = (getattr(event, "message", None) or "").strip()
+            if text.startswith("/"):
+                parts = text.split(None, 1)
+                if len(parts) > 1:
+                    arg = parts[1].strip().lower()
+        except Exception:
+            arg = ""
 
-        if not raw_args or arg in {"status", "?"}:
-            state = "disabled" if current else "enabled"
-            scope = "session" if has_session_override else "global"
-            return (
-                f"🤖 Router: **{state}**\n"
-                f"Task complexity routing is {'disabled' if current else 'active'}.\n"
-                f"Scope: `{scope}`."
-            )
+        current = _router_disabled()
 
-        if arg == "reset":
-            if persist_global:
-                return "Usage: /router reset (session only)"
-            self._set_session_router_override(session_key, None)
-            self._evict_cached_agent(session_key)
-            current = _router_disabled()
+        if arg in {"status", "?"}:
             state = "disabled" if current else "enabled"
-            return (
-                f"🤖 Router override cleared\n"
-                f"Task complexity routing is now {state} for this session (using global default)."
-            )
+            return f"🤖 Router: **{state}**\nTask complexity routing is {'disabled' if current else 'active'}."
 
         if arg in {"on", "enable", "true", "1"}:
             new_state = False
         elif arg in {"off", "disable", "false", "0"}:
             new_state = True
+        elif arg == "":
+            new_state = not current
         else:
-            return "Usage: /router [on|off|reset|status] [--global]"
+            return "Usage: /router [on|off|status]"
 
-        if persist_global:
-            _router_disabled(new_state)
-            self._set_session_router_override(session_key, None)
-            self._evict_cached_agent(session_key)
-            state = "disabled" if new_state else "enabled"
-            return (
-                f"🤖 Router: **{state}**\n"
-                "Task complexity routing default saved to config and takes effect on next message."
-            )
-
-        self._set_session_router_override(session_key, new_state)
-        self._evict_cached_agent(session_key)
+        _router_disabled(new_state)
         state = "disabled" if new_state else "enabled"
-        return (
-            f"🤖 Router: **{state}**\n"
-            "Task complexity routing updated for this session only and takes effect on next message."
-        )
+        action = "Disabled" if new_state else "Enabled"
+        return f"🤖 Router: **{action}**\nTask complexity routing is now {state}."
 
     async def _handle_compress_command(self, event: MessageEvent) -> str:
         """Handle /compress command -- manually compress conversation context.
@@ -16669,12 +16578,10 @@ class GatewayRunner:
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
-            # Apply effective task complexity router toggle for this session.
+            # Apply global task complexity router toggle (set via /router command)
             try:
-                agent._task_complexity_router_disabled = self._resolve_session_router_disabled(
-                    source=source,
-                    session_key=session_key,
-                )
+                from hermes_cli.commands import _router_disabled
+                agent._task_complexity_router_disabled = _router_disabled()
             except Exception:
                 pass
 

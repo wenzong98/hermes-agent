@@ -32,7 +32,6 @@ from agent.task_complexity_router import (
     get_model_for_task,
     resolve_effective_model_route,
     _resolve_complexity,
-    _resolve_runtime_route_target,
 )
 
 
@@ -234,12 +233,6 @@ def test_configure_from_dict_overrides_model_tiers():
         configure_from_dict({})
 
 
-def test_openai_route_targets_codex_runtime():
-    provider, model = _resolve_runtime_route_target("openai", "openai/gpt-5.4")
-    assert provider == "openai-codex"
-    assert model == "openai/gpt-5.4"
-
-
 def test_ensure_router_config_loaded_applies_config_once():
     ensure_router_config_loaded({
         "task_complexity_router": {
@@ -252,31 +245,17 @@ def test_ensure_router_config_loaded_applies_config_once():
     configure_from_dict({})
 
 
-def test_activate_effective_route_updates_primary_runtime(monkeypatch):
-    captured = {}
-
-    class MockClient:
-        _base_url = "https://chatgpt.com/backend-api/codex"
-        base_url = "https://chatgpt.com/backend-api/codex"
-        api_key = "sk-test"
-
-    def _resolve_provider_client(provider, model=None, raw_codex=False):
         captured["provider"] = provider
-        captured["model"] = model
-        captured["raw_codex"] = raw_codex
         return MockClient(), model or "gpt-5.4"
-
-    fake_aux = types.SimpleNamespace(
+        _base_url = "https://api.openai.com/v1"
+        base_url = "https://api.openai.com/v1"
         resolve_provider_client=_resolve_provider_client
     )
-    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", fake_aux)
-
-    agent = MockAgent()
-    route = EffectiveModelRoute(
-        provider="openai",
-        model="gpt-5.4",
         source="user_override",
-        normalized_query="查看配置",
+        resolve_provider_client=lambda provider, model=None, raw_codex=False: (
+            MockClient(),
+            model or "gpt-5.4",
+        )
         user_override="openai/gpt-5.4",
         decision=RouteDecision(
             complexity=Complexity.UNKNOWN,
@@ -299,17 +278,10 @@ def test_activate_effective_route_updates_primary_runtime(monkeypatch):
     assert agent.model == "gpt-5.4"
     assert agent.api_mode == "codex_responses"
     assert agent._primary_runtime["provider"] == "openai-codex"
-    assert agent._primary_runtime["model"] == "gpt-5.4"
-    assert agent._primary_runtime["api_mode"] == "codex_responses"
-    assert agent._fallback_activated is False
-    assert agent._fallback_index == 0
-
-
+    assert agent.provider == "openai"
 # ---------------------------------------------------------------------------
-# Per-query routing integration
-# ---------------------------------------------------------------------------
+    assert agent._primary_runtime["provider"] == "openai"
 
-def test_per_query_upgrade_simple_session_to_complex_tool(monkeypatch):
     """Scenario: session starts with a simple query (MiniMax).
     LLM then decides to call write_file (FORCE_COMPLEX tool).
     The router must re-classify and upgrade to kimi-k2.6.
@@ -321,21 +293,21 @@ def test_per_query_upgrade_simple_session_to_complex_tool(monkeypatch):
         _base_url = "https://api.kimi.com"
         base_url = "https://api.kimi.com"
         api_key = "mock-key"
-
+    The router must re-classify and upgrade to kimi-k2.6.
     mock_client = MockKimiClient()
     fake_aux = types.SimpleNamespace(
         resolve_provider_client=lambda p, model=None, raw_codex=False: (
             (mock_client, model or "kimi-k2.6")
-            if p == "kimi"
-            else (mock_client, model or "MiniMax-M2.7-highspeed")
-        )
+    class MockKimiClient:
+        _base_url = "https://api.kimi.com"
+        base_url = "https://api.kimi.com"
     )
     monkeypatch.setitem(sys.modules, "agent.auxiliary_client", fake_aux)
-
+    mock_client = MockKimiClient()
     agent = MockAgent()
     assert agent.model == "MiniMax-M2.7-highspeed"
-    assert agent.provider == "minimax-cn"
-
+            (mock_client, model or "kimi-k2.6")
+            if p == "kimi"
     # Turn 1: user asks a simple question → classify as SIMPLE
     clear_current_routing_context()
     resolve_effective_model_route("帮我查下今天的天气", record=False)
@@ -361,8 +333,8 @@ def test_per_query_upgrade_simple_session_to_complex_tool(monkeypatch):
     normalized = RouteDecision(
         complexity=_resolve_complexity(decision.complexity),
         primary_signal=decision.primary_signal,
-        matched_rules=decision.matched_rules,
-        suggested_model=decision.suggested_model,
+    assert decision.suggested_model == "kimi-k2.6"
+    assert decision.suggested_provider == "kimi"
         suggested_provider=decision.suggested_provider,
         reason=decision.reason,
         latency_ms=getattr(decision, "latency_ms", 0.0),
@@ -378,9 +350,8 @@ def test_per_query_upgrade_simple_session_to_complex_tool(monkeypatch):
 def test_no_upgrade_when_already_complex():
     """Session already has COMPLEX context — no downgrade, no spurious activation."""
     agent = MockAgent()
-    agent.model = "kimi-k2.6"
-    agent.provider = "kimi"
-
+    assert agent.model == "kimi-k2.6"
+    assert agent.provider == "kimi"
     clear_current_routing_context()
     resolve_effective_model_route("帮我深度调研 adaptive rag 的实现方案", record=False)
     ctx = get_current_routing_context()
@@ -388,8 +359,8 @@ def test_no_upgrade_when_already_complex():
 
     # write_file is FORCE_COMPLEX but we're already complex — should NOT upgrade
     required_tier = get_tool_tier_for_upgrade("write_file")
-    current_complexity = ctx.get("complexity")
-    assert required_tier == Complexity.COMPLEX
+    agent.model = "kimi-k2.6"
+    agent.provider = "kimi"
 
     # Condition for upgrade: required COMPLEX AND current in (simple, unknown)
     should_upgrade = (required_tier == Complexity.COMPLEX and current_complexity in ("simple", "unknown"))

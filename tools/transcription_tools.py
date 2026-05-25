@@ -217,7 +217,7 @@ def _try_lazy_install_stt() -> bool:
     return False
 
 
-def _get_provider(stt_config: dict, *, allow_lazy_install: bool = True) -> str:
+def _get_provider(stt_config: dict) -> str:
     """Determine which STT provider to use.
 
     When ``stt.provider`` is explicitly set in config, that choice is
@@ -239,7 +239,7 @@ def _get_provider(stt_config: dict, *, allow_lazy_install: bool = True) -> str:
             if _has_local_command():
                 return "local_command"
             # Try lazy-install before giving up
-            if allow_lazy_install and _try_lazy_install_stt():
+            if _try_lazy_install_stt():
                 return "local"
             logger.warning(
                 "STT provider 'local' configured but unavailable "
@@ -309,7 +309,7 @@ def _get_provider(stt_config: dict, *, allow_lazy_install: bool = True) -> str:
     if _has_local_command():
         return "local_command"
     # Try lazy-install before falling through to cloud providers
-    if allow_lazy_install and _try_lazy_install_stt():
+    if _try_lazy_install_stt():
         return "local"
     if _HAS_OPENAI and get_env_value("GROQ_API_KEY"):
         logger.info("No local STT available, using Groq Whisper API")

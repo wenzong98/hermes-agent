@@ -1044,7 +1044,7 @@ def check_voice_requirements() -> Dict[str, Any]:
     from tools.transcription_tools import _get_provider, _load_stt_config, is_stt_enabled
     stt_config = _load_stt_config()
     stt_enabled = is_stt_enabled(stt_config)
-    stt_provider = _get_provider(stt_config, allow_lazy_install=False)
+    stt_provider = _get_provider(stt_config)
     stt_available = stt_enabled and stt_provider != "none"
 
     missing: List[str] = []

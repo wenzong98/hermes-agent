@@ -318,6 +318,94 @@ class TestRegistryResolution:
         assert result.supports_extract() is True
         assert result.is_available() is True
 
+    def test_complex_routing_prefers_tavily_over_minimax_mcp(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When task complexity router flags turn as "complex", Tavily is
+        preferred even when MiniMax MCP web_search (or other higher-legacy-
+        preference providers like Firecrawl) is also available.
+
+        Regression: without this short-circuit, the legacy preference walk
+        (firecrawl → parallel → tavily → …) would pick Firecrawl first,
+        and the model could still call MiniMax MCP web_search directly,
+        bypassing Tavily's advanced search for complex tasks.
+        """
+        _ensure_plugins_loaded()
+
+        from agent.task_complexity_router import (
+            clear_current_routing_context,
+            set_current_routing_context,
+        )
+        from agent.web_search_registry import get_active_search_provider
+
+        clear_current_routing_context()
+        try:
+            set_current_routing_context({
+                "complexity": "complex",
+                "primary_signal": "llm_arbiter",
+                "reason": "complex task – prefer deep search",
+                "provider": "openai",
+                "model": "gpt-5.4",
+                "route_source": "task_router",
+                "user_override": None,
+            })
+
+            monkeypatch.setenv("TAVILY_API_KEY", "real")
+            monkeypatch.setenv("FIRECRAWL_API_KEY", "real")
+
+            provider = get_active_search_provider()
+            assert provider is not None, (
+                "Expected a search provider when Tavily is available"
+            )
+            assert provider.name == "tavily", (
+                "Complex routing must prefer Tavily over Firecrawl (higher "
+                "legacy preference) and MiniMax MCP web_search; got: "
+                f"{provider.name}"
+            )
+        finally:
+            clear_current_routing_context()
+
+
+    def test_complex_routing_no_tavily_falls_back_to_legacy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When Tavily is unavailable, complex routing falls through to
+        the normal legacy preference walk."""
+        _ensure_plugins_loaded()
+
+        from agent.task_complexity_router import (
+            clear_current_routing_context,
+            set_current_routing_context,
+        )
+        from agent.web_search_registry import get_active_search_provider
+
+        clear_current_routing_context()
+        try:
+            set_current_routing_context({
+                "complexity": "complex",
+                "primary_signal": "llm_arbiter",
+                "reason": "complex task – prefer deep search",
+                "provider": "openai",
+                "model": "gpt-5.4",
+                "route_source": "task_router",
+                "user_override": None,
+            })
+
+            monkeypatch.setenv("FIRECRAWL_API_KEY", "real")
+
+            provider = get_active_search_provider()
+            assert provider is not None, (
+                "When Tavily is unavailable, fallback should pick another "
+                "available provider"
+            )
+            assert provider.name == "firecrawl", (
+                f"Expected firecrawl (first available in legacy order when "
+                f"Tavily is absent); got {provider.name}"
+            )
+        finally:
+            clear_current_routing_context()
+
+
     def test_no_config_no_credentials_returns_none(
         self,
     ) -> None:
