@@ -55,12 +55,10 @@ from agent.model_metadata import (
     save_context_length,
 )
 from agent.task_complexity_router import (
-    Complexity,
-    RouteDecision,
-    classify,
-    get_model_for_task,
-    activate_model_tier,
+    EffectiveModelRoute,
     clear_current_routing_context,
+    activate_effective_route,
+    resolve_effective_model_route,
 )
 from agent.nous_rate_guard import (
     clear_nous_rate_limit,
@@ -311,50 +309,54 @@ def run_conversation(
     # Simple tasks (read config, list dir) → MiniMax fast; complex tasks (planning,
     # code) → kimi-k2.6. Decision is logged to JSONL for analysis.
     # Skip routing when agent._task_complexity_router_disabled is set (e.g. in tests).
-    _routing_decision: Optional[RouteDecision] = None
+    _effective_route: Optional[EffectiveModelRoute] = None
+    agent._current_routing_decision = None
+    agent._current_effective_route = None
     if not getattr(agent, "_task_complexity_router_disabled", False):
         try:
             _effective_user_msg = persist_user_message if persist_user_message is not None else user_message
             if isinstance(_effective_user_msg, str) and _effective_user_msg.strip():
-                _routing_decision = classify(_effective_user_msg, record=True)
-                if _routing_decision and _routing_decision.complexity not in (
-                    Complexity.UNKNOWN, Complexity.FORCE_SIMPLE, Complexity.FORCE_COMPLEX,
-                ):
-                    # 记录切换前的模型，用于后续判断是否发生了实际切换
-                    _old_model_before_switch = getattr(agent, "model", "")
-                    _old_provider_before_switch = getattr(agent, "provider", "")
-                    _switched = activate_model_tier(agent, _routing_decision)
+                _effective_route = resolve_effective_model_route(
+                    _effective_user_msg,
+                    user_override=getattr(agent, "_task_complexity_user_override", None),
+                    record=True,
+                )
+                _old_model_before_switch = getattr(agent, "model", "")
+                _old_provider_before_switch = getattr(agent, "provider", "")
+                _switched = activate_effective_route(agent, _effective_route)
 
-                    # 提示：优先用 interim_assistant_callback（不依赖 streaming），
-                    #  fallback 到 stream_delta_callback（兼容旧行为）
-                    if _switched:
-                        _switch_msg = (
-                            f"🔀 Router判断：正在切换到 {_routing_decision.suggested_model} "
-                            f"({_routing_decision.suggested_provider})"
-                        )
-                    else:
-                        _switch_msg = (
-                            f"🔀 Router判断：保持 {_old_model_before_switch} "
-                            f"({_old_provider_before_switch}) — 无需切换"
-                        )
-                    _callback_sent = False
-                    if getattr(agent, "interim_assistant_callback", None):
-                        try:
-                            agent.interim_assistant_callback(_switch_msg)
-                            _callback_sent = True
-                        except Exception:
-                            pass
-                    if not _callback_sent and agent.stream_delta_callback:
-                        try:
-                            agent.stream_delta_callback(f"\n{_switch_msg}\n")
-                        except Exception:
-                            pass  # 流式回调失败不阻塞主流程
+                # 提示：优先用 interim_assistant_callback（不依赖 streaming），
+                # fallback 到 stream_delta_callback（兼容旧行为）
+                if _switched:
+                    _switch_msg = (
+                        f"🔀 Router判断：正在切换到 {_effective_route.model} "
+                        f"({_effective_route.provider or _old_provider_before_switch})"
+                    )
+                else:
+                    _switch_msg = (
+                        f"🔀 Router判断：保持 {_old_model_before_switch} "
+                        f"({_old_provider_before_switch}) — 无需切换"
+                    )
+                _callback_sent = False
+                if getattr(agent, "interim_assistant_callback", None):
+                    try:
+                        agent.interim_assistant_callback(_switch_msg)
+                        _callback_sent = True
+                    except Exception:
+                        pass
+                if not _callback_sent and agent.stream_delta_callback:
+                    try:
+                        agent.stream_delta_callback(f"\n{_switch_msg}\n")
+                    except Exception:
+                        pass  # 流式回调失败不阻塞主流程
 
-                    # Expose decision on agent so tools / hooks can read it if needed
-                    agent._current_routing_decision = _routing_decision
+                # Expose decision on agent so tools / hooks can read it if needed
+                agent._current_routing_decision = _effective_route.decision
+                agent._current_effective_route = _effective_route
         except Exception as _router_err:
             logging.debug("Task complexity router error (non-fatal): %s", _router_err)
             agent._current_routing_decision = None
+            agent._current_effective_route = None
 
     # Sanitize surrogate characters from user input.  Clipboard paste from
     # rich-text editors (Google Docs, Word, etc.) can inject lone surrogates

@@ -1,22 +1,22 @@
 """
 Task Complexity Router — 任务复杂度路由
 
-在 LLM 调用前根据启发式规则判断任务复杂度，
+在 LLM 调用前根据 query / tool 信号判断任务复杂度，
 自动选择合适的模型 tier：
 
 - simple  → 轻量快速模型（MiniMax-M2.7 高速版 / deepseek-v4-flash）
-- complex → 高质量模型（kimi-k2.6 / claude-sonnet-4 / GPT-4）
+- complex → 高质量模型（kimi-k2.6 / GPT-5）
 
-设计原则：
-1. 零额外 LLM 调用 — 纯启发式判断，无 latency 开销
-2. 可干预 — 用户可通过 @mention 指定模型，覆盖自动路由
-3. 工具级控制 — 特定工具强制走 complex 或 simple tier
-4. JSONL 追踪 — 每次路由决策写入日志，便于分析调优
+当前行为：
+1. 优先走纯启发式规则；只有规则未命中时，才会调用 MiniMax 高速版仲裁
+2. 可接受显式的调用方 override，并保证其优先于自动路由
+3. 工具级控制：特定工具可强制升级到 complex tier
+4. JSONL 追踪：每次路由决策写入日志，便于分析调优
+5. 会更新 agent 的有效主路由（`_primary_runtime`），与 fallback 恢复逻辑协同
 
 集成点：
-- agent/conversation_loop.py  ：用户消息入口分类
-- model_tools.py/handle_function_call：工具执行前拦截
-- agent/tool_executor.py     ：工具执行复杂度记录
+- agent/conversation_loop.py  ：用户消息入口分类与 effective route 应用
+- agent/tool_executor.py      ：工具执行前按需升级复杂度
 """
 
 from __future__ import annotations
@@ -27,7 +27,9 @@ import os
 import re
 import time
 import threading
-from dataclasses import dataclass, field, asdict
+from contextvars import ContextVar
+from copy import deepcopy
+from dataclasses import dataclass, asdict
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -54,6 +56,18 @@ class RouteDecision:
     suggested_provider: str   # 建议 provider
     reason: str               # 人类可读原因
     latency_ms: float = 0.0
+
+
+@dataclass(frozen=True)
+class EffectiveModelRoute:
+    """Single source of truth for the active model route of a turn."""
+
+    provider: str
+    model: str
+    decision: RouteDecision
+    source: str
+    normalized_query: str
+    user_override: Optional[str] = None
 
 
 @dataclass
@@ -207,7 +221,7 @@ def get_tool_tier_for_upgrade(tool_name: str) -> Complexity | None:
 
 
 # 模型分级配置（可从 config 覆盖）
-MODEL_TIERS = {
+_DEFAULT_MODEL_TIERS = {
     Complexity.SIMPLE: {
         "default": {
             "provider": "minimax",
@@ -228,6 +242,12 @@ MODEL_TIERS = {
         ],
     },
 }
+
+MODEL_TIERS = deepcopy(_DEFAULT_MODEL_TIERS)
+
+_INLINE_MODEL_OVERRIDE_RE = re.compile(
+    r"^\s*@(?P<override>[A-Za-z0-9._:-]+(?:/[A-Za-z0-9._:-]+)?)\s+(?P<rest>.+?)\s*$"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +382,7 @@ def classify_query(query: str, tool_name: Optional[str] = None) -> RouteDecision
                         primary_signal=f"tool:{tool_name}",
                         matched_rules=[f"TOOL_MAP:{pattern}"],
                         reason=f"工具 {tool_name} 映射为 {complexity.value}",
-                        latency_ms=time.monotonic() - start,
+                        latency_ms=(time.monotonic() - start) * 1000,
                     )
             elif tool_name == pattern:
                 return _make_decision(
@@ -370,7 +390,7 @@ def classify_query(query: str, tool_name: Optional[str] = None) -> RouteDecision
                     primary_signal=f"tool:{tool_name}",
                     matched_rules=[f"TOOL_MAP:{pattern}"],
                     reason=f"工具 {tool_name} 映射为 {complexity.value}",
-                    latency_ms=time.monotonic() - start,
+                    latency_ms=(time.monotonic() - start) * 1000,
                 )
 
     # ── 启发式规则判断 ──────────────────────────────────────────────────
@@ -384,7 +404,7 @@ def classify_query(query: str, tool_name: Optional[str] = None) -> RouteDecision
                 primary_signal="heuristic_complex",
                 matched_rules=[pat],
                 reason=f"命中复杂规则 [{pat}]",
-                latency_ms=time.monotonic() - start,
+                latency_ms=(time.monotonic() - start) * 1000,
             )
 
     # 再检查 simple 规则
@@ -395,7 +415,7 @@ def classify_query(query: str, tool_name: Optional[str] = None) -> RouteDecision
                 primary_signal="heuristic_simple",
                 matched_rules=[pat],
                 reason=f"命中简单规则 [{pat}]",
-                latency_ms=time.monotonic() - start,
+                latency_ms=(time.monotonic() - start) * 1000,
             )
 
     # ── 无规则匹配 → 触发 LLM 仲裁 ──────────────────────────────────────
@@ -485,25 +505,69 @@ _ROUTING_LOG_PATH = Path(os.path.expanduser("~/.hermes/task_complexity_router.js
 _ROUTING_LOG_LOCK = threading.Lock()
 
 # ---------------------------------------------------------------------------
-# Per-query routing context — thread-local, consumed by web providers
+# Per-query routing context — contextvars-based, safe across async boundaries
 # ---------------------------------------------------------------------------
 
-_routing_ctx = threading.local()
+_routing_ctx: ContextVar[dict | None] = ContextVar(
+    "task_complexity_router_ctx",
+    default=None,
+)
+
+_CONFIG_LOCK = threading.Lock()
+_CONFIG_FINGERPRINT: str | None = None
 
 
 def get_current_routing_context() -> dict:
     """Return the current query routing context dict, or empty dict if none."""
-    ctx = getattr(_routing_ctx, "value", None)
-    return ctx if ctx is not None else {}
+    ctx = _routing_ctx.get()
+    return dict(ctx) if isinstance(ctx, dict) else {}
 
 
 def set_current_routing_context(ctx: dict) -> None:
     """Store the current query routing context for consumption by web providers."""
-    _routing_ctx.value = ctx
+    _routing_ctx.set(dict(ctx))
 
 
 def clear_current_routing_context() -> None:
-    _routing_ctx.value = None
+    _routing_ctx.set(None)
+
+
+def _compute_config_fingerprint(config: dict) -> str:
+    try:
+        return json.dumps(
+            config.get("task_complexity_router", {}) or {},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    except Exception:
+        return ""
+
+
+def ensure_router_config_loaded(config: Optional[dict] = None) -> None:
+    """Load task router config once per effective config fingerprint."""
+    global _CONFIG_FINGERPRINT
+
+    explicit_config = config is not None
+    if config is None:
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config() or {}
+        except Exception:
+            config = {}
+
+    section = {}
+    if isinstance(config, dict):
+        section = config.get("task_complexity_router", {}) or {}
+    if not explicit_config and not section and _CONFIG_FINGERPRINT is not None:
+        return
+
+    fingerprint = _compute_config_fingerprint(config if isinstance(config, dict) else {})
+    with _CONFIG_LOCK:
+        if fingerprint == _CONFIG_FINGERPRINT:
+            return
+        configure_from_dict(config if isinstance(config, dict) else {})
+        _CONFIG_FINGERPRINT = fingerprint
 
 
 def _ensure_log_dir():
@@ -528,7 +592,7 @@ def record_routing_event(
         reason=decision.reason,
         tool_name=tool_name,
         override=override,
-        latency_ms=round(decision.latency_ms * 1000, 2),
+        latency_ms=round(decision.latency_ms, 2),
     )
     try:
         _ensure_log_dir()
@@ -540,6 +604,115 @@ def record_routing_event(
     except Exception:
         # 写入失败不阻塞主流程，仅记录
         pass
+
+
+def _extract_user_override(
+    query: str,
+    user_override: Optional[str] = None,
+) -> tuple[Optional[str], str]:
+    """Resolve explicit override from caller or inline `@provider/model` prefix."""
+    if user_override:
+        return user_override.strip(), query
+    match = _INLINE_MODEL_OVERRIDE_RE.match(query)
+    if not match:
+        return None, query
+    override = (match.group("override") or "").strip()
+    rest = (match.group("rest") or "").strip()
+    return (override or None), rest
+
+
+def _build_routing_context(route: EffectiveModelRoute) -> dict:
+    return {
+        "complexity": route.decision.complexity.value,
+        "primary_signal": route.decision.primary_signal,
+        "reason": route.decision.reason,
+        "provider": route.provider,
+        "model": route.model,
+        "route_source": route.source,
+        "user_override": route.user_override,
+    }
+
+
+def _classify_without_side_effects(
+    query: str,
+    tool_name: Optional[str] = None,
+    tool_args: Optional[dict] = None,
+) -> RouteDecision:
+    decision = classify_query(query, tool_name)
+
+    # Terminal 内容二次判断
+    if tool_name == "terminal" and tool_args:
+        cmd = tool_args.get("command", "")
+        if cmd:
+            terminal_decision = classify_terminal_content(cmd)
+            # terminal 二次判断覆盖原有的 simple 结论
+            if terminal_decision.complexity == Complexity.COMPLEX:
+                decision = terminal_decision
+
+    return decision
+
+
+def resolve_effective_model_route(
+    query: str,
+    tool_name: Optional[str] = None,
+    tool_args: Optional[dict] = None,
+    user_override: Optional[str] = None,
+    record: bool = True,
+    config: Optional[dict] = None,
+) -> EffectiveModelRoute:
+    """Resolve the effective route for the current turn or tool invocation."""
+    ensure_router_config_loaded(config)
+
+    raw_query = query or ""
+    resolved_override, normalized_query = _extract_user_override(raw_query, user_override)
+
+    if resolved_override:
+        if "/" in resolved_override:
+            provider, model = resolved_override.split("/", 1)
+        else:
+            # Keep the current provider when callers only supply a model name.
+            provider, model = "", resolved_override
+        decision = RouteDecision(
+            complexity=Complexity.UNKNOWN,
+            primary_signal="user_override",
+            matched_rules=[],
+            suggested_model=model,
+            suggested_provider=provider,
+            reason=f"显式路由覆盖: {resolved_override}",
+        )
+        route = EffectiveModelRoute(
+            provider=provider,
+            model=model,
+            decision=decision,
+            source="user_override",
+            normalized_query=normalized_query,
+            user_override=resolved_override,
+        )
+    else:
+        decision = _classify_without_side_effects(
+            normalized_query,
+            tool_name=tool_name,
+            tool_args=tool_args,
+        )
+        route = EffectiveModelRoute(
+            provider=decision.suggested_provider,
+            model=decision.suggested_model,
+            decision=decision,
+            source="task_router",
+            normalized_query=normalized_query,
+            user_override=None,
+        )
+
+    if record:
+        record_routing_event(
+            normalized_query or raw_query,
+            route.decision,
+            tool_name,
+            override=bool(route.user_override),
+        )
+
+    set_current_routing_context(_build_routing_context(route))
+    return route
 
 
 # ---------------------------------------------------------------------------
@@ -564,16 +737,8 @@ def classify(
     Returns:
         RouteDecision 对象
     """
-    decision = classify_query(query, tool_name)
-
-    # Terminal 内容二次判断
-    if tool_name == "terminal" and tool_args:
-        cmd = tool_args.get("command", "")
-        if cmd:
-            terminal_decision = classify_terminal_content(cmd)
-            # terminal 二次判断覆盖原有的 simple 结论
-            if terminal_decision.complexity == Complexity.COMPLEX:
-                decision = terminal_decision
+    ensure_router_config_loaded()
+    decision = _classify_without_side_effects(query, tool_name, tool_args)
 
     if record:
         record_routing_event(query, decision, tool_name)
@@ -583,6 +748,10 @@ def classify(
         "complexity": decision.complexity.value,
         "primary_signal": decision.primary_signal,
         "reason": decision.reason,
+        "provider": decision.suggested_provider,
+        "model": decision.suggested_model,
+        "route_source": "task_router",
+        "user_override": None,
     })
 
     return decision
@@ -593,30 +762,22 @@ def get_model_for_task(
     tool_name: Optional[str] = None,
     tool_args: Optional[dict] = None,
     user_override: Optional[str] = None,  # 用户手动指定的模型
+    config: Optional[dict] = None,
 ) -> tuple[str, str, RouteDecision]:
     """
     返回 (provider, model, decision)。
 
     如果 user_override 存在，直接返回用户指定的模型，跳过分层逻辑。
     """
-    if user_override:
-        # 格式支持： "kimi/kimi-k2.6" 或 "kimi-k2.6"（自动补 provider）
-        if "/" in user_override:
-            provider, model = user_override.split("/", 1)
-        else:
-            provider, model = "user_specified", user_override
-        decision = RouteDecision(
-            complexity=Complexity.UNKNOWN,
-            primary_signal="user_override",
-            matched_rules=[],
-            suggested_model=model,
-            suggested_provider=provider,
-            reason=f"用户手动指定: {user_override}",
-        )
-        return provider, model, decision
-
-    decision = classify(query, tool_name, tool_args)
-    return decision.suggested_provider, decision.suggested_model, decision
+    route = resolve_effective_model_route(
+        query,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        user_override=user_override,
+        record=True,
+        config=config,
+    )
+    return route.provider, route.model, route.decision
 
 
 # ---------------------------------------------------------------------------
@@ -631,11 +792,12 @@ def configure_from_dict(config: dict) -> None:
     """从 dict（如从 config.yaml 读取的）加载自定义配置。"""
     global _CONFIGURED, _CUSTOM_TIERS
     tier_config = config.get("task_complexity_router", {})
-    if not tier_config:
-        return
-
     global MODEL_TIERS
-    _CUSTOM_TIERS = tier_config
+    MODEL_TIERS = deepcopy(_DEFAULT_MODEL_TIERS)
+    _CUSTOM_TIERS = tier_config or {}
+    if not tier_config:
+        _CONFIGURED = False
+        return
 
     # 允许覆盖 simple tier 模型
     simple_cfg = tier_config.get("simple_tier", {})
@@ -644,6 +806,8 @@ def configure_from_dict(config: dict) -> None:
             "provider": simple_cfg.get("provider", "minimax"),
             "model": simple_cfg.get("model", "MiniMax-M2.7-highspeed"),
         }
+        if isinstance(simple_cfg.get("fallback"), list):
+            MODEL_TIERS[Complexity.SIMPLE]["fallback"] = deepcopy(simple_cfg["fallback"])
 
     # 允许覆盖 complex tier 模型
     complex_cfg = tier_config.get("complex_tier", {})
@@ -652,30 +816,25 @@ def configure_from_dict(config: dict) -> None:
             "provider": complex_cfg.get("provider", "kimi"),
             "model": complex_cfg.get("model", "kimi-k2.6"),
         }
+        if isinstance(complex_cfg.get("fallback"), list):
+            MODEL_TIERS[Complexity.COMPLEX]["fallback"] = deepcopy(complex_cfg["fallback"])
 
     _CONFIGURED = True
 
 
-def activate_model_tier(agent, decision: RouteDecision) -> bool:
-    """
-    将 agent 切换到指定 complexity tier 的模型。
-
-    流程：
-    1. 从 MODEL_TIERS 取出对应 tier 的默认模型
-    2. 通过 resolve_provider_client 构造新 client（自动处理 key/endpoint）
-    3. 更新 agent.model / agent.provider / agent.base_url / agent.api_key / agent._client_kwargs
-    4. 清除 _transport_cache 强制重建
-
-    注意：
-    - 不修改 _primary_runtime（那是 fallback/自动降级用的，不是我们手动切换）
-    - 调用方确保 decision 不是 UNKNOWN / FORCE_* 类型
-    """
-    if decision.complexity in (Complexity.UNKNOWN, Complexity.FORCE_SIMPLE, Complexity.FORCE_COMPLEX):
+def _apply_model_route(
+    agent,
+    provider: str,
+    model: str,
+    *,
+    reason: str,
+    source: str,
+) -> bool:
+    """Apply a resolved route to the agent and persist it as the new primary runtime."""
+    new_provider = (provider or getattr(agent, "provider", "") or "").strip()
+    new_model = (model or getattr(agent, "model", "") or "").strip()
+    if not new_provider or not new_model:
         return False
-
-    tier = MODEL_TIERS[decision.complexity]
-    new_provider = decision.suggested_provider
-    new_model = decision.suggested_model
 
     # 跳过同 provider+model 的切换
     current_provider = (getattr(agent, "provider", "") or "").strip().lower()
@@ -729,9 +888,8 @@ def activate_model_tier(agent, decision: RouteDecision) -> bool:
         # 清除 API client 缓存，触发重新构造
         agent.client = None
 
-        # Update _primary_runtime so automatic fallback restoration doesn't
-        # undo a deliberate task-complexity routing decision mid-session.
-        # Match the shape of what create_openai_client saves (agent_runtime_helpers).
+        # Update _primary_runtime so fallback restore and cached-agent reuse
+        # treat this route as the current preferred primary runtime.
         agent._primary_runtime = {
             "model": agent.model,
             "provider": agent.provider,
@@ -742,12 +900,20 @@ def activate_model_tier(agent, decision: RouteDecision) -> bool:
             "use_prompt_caching": getattr(agent, "_use_prompt_caching", False),
             "use_native_cache_layout": getattr(agent, "_use_native_cache_layout", False),
         }
+        if getattr(agent, "api_mode", "") == "anthropic_messages":
+            agent._primary_runtime.update({
+                "anthropic_api_key": getattr(agent, "_anthropic_api_key", ""),
+                "anthropic_base_url": getattr(agent, "_anthropic_base_url", ""),
+                "is_anthropic_oauth": getattr(agent, "_is_anthropic_oauth", False),
+            })
+        agent._fallback_activated = False
+        agent._fallback_index = 0
         # Invalidate cached system prompt so it rebuilds with new model next turn
         agent._cached_system_prompt = None
 
         logging.info(
-            "[TaskComplexityRouter] 模型切换: complexity=%s provider=%s model=%s reason=%s",
-            decision.complexity.value, new_provider, agent.model, decision.reason,
+            "[TaskComplexityRouter] 模型切换: source=%s provider=%s model=%s reason=%s",
+            source, new_provider, agent.model, reason,
         )
         return True
 
@@ -757,6 +923,43 @@ def activate_model_tier(agent, decision: RouteDecision) -> bool:
             new_provider, new_model, exc,
         )
         return False
+
+
+def activate_effective_route(agent, route: EffectiveModelRoute) -> bool:
+    """Apply the resolved effective route to the agent."""
+    return _apply_model_route(
+        agent,
+        route.provider or getattr(agent, "provider", ""),
+        route.model or getattr(agent, "model", ""),
+        reason=route.decision.reason,
+        source=route.source,
+    )
+
+
+def activate_model_tier(agent, decision: RouteDecision) -> bool:
+    """
+    将 agent 切换到指定 complexity tier 的模型。
+
+    流程：
+    1. 从 MODEL_TIERS 取出对应 tier 的默认模型
+    2. 通过 resolve_provider_client 构造新 client（自动处理 key/endpoint）
+    3. 更新 agent.model / agent.provider / agent.base_url / agent.api_key / agent._client_kwargs
+    4. 清除 _transport_cache 强制重建
+
+    注意：
+    - 会同步更新 `_primary_runtime`，让 fallback 恢复逻辑使用新的首选主路由
+    - 调用方确保 decision 不是 UNKNOWN / FORCE_* 类型
+    """
+    if decision.complexity in (Complexity.UNKNOWN, Complexity.FORCE_SIMPLE, Complexity.FORCE_COMPLEX):
+        return False
+
+    return _apply_model_route(
+        agent,
+        decision.suggested_provider,
+        decision.suggested_model,
+        reason=decision.reason,
+        source=decision.primary_signal,
+    )
 
 
 # ---------------------------------------------------------------------------

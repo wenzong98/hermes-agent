@@ -43,6 +43,7 @@ from agent.model_metadata import (
 )
 from agent.process_bootstrap import _install_safe_stdio
 from agent.subdirectory_hints import SubdirectoryHintTracker
+from agent.task_complexity_router import ensure_router_config_loaded
 from agent.think_scrubber import StreamingThinkScrubber
 from agent.tool_guardrails import (
     ToolCallGuardrailConfig,
@@ -1042,6 +1043,10 @@ def init_agent(
     except Exception:
         _agent_cfg = {}
     try:
+        ensure_router_config_loaded(_agent_cfg)
+    except Exception as _router_cfg_err:
+        _ra().logger.debug("Task complexity router config ignored: %s", _router_cfg_err)
+    try:
         agent._tool_guardrails = ToolCallGuardrailController(
             ToolCallGuardrailConfig.from_mapping(
                 _agent_cfg.get("tool_loop_guardrails", {})
@@ -1593,6 +1598,7 @@ def init_agent(
     # Gateway status_callback is not yet wired, so any warning is stored
     # in _compression_warning and replayed in the first run_conversation().
     agent._compression_warning = None
+    agent._task_complexity_user_override = None
     # Lazy feasibility check: deferred to the first turn that approaches the
     # compression threshold. Running it eagerly here costs ~400ms cold (network
     # probe of the auxiliary provider chain + /models lookup) on every agent

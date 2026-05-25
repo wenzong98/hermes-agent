@@ -12,11 +12,14 @@ Tests cover:
 """
 
 import threading
-import pytest
+import types
+import sys
 
 from agent.task_complexity_router import (
     Complexity,
+    EffectiveModelRoute,
     RouteDecision,
+    activate_effective_route,
     classify,
     get_tool_complexity,
     get_tool_tier_for_upgrade,
@@ -24,6 +27,10 @@ from agent.task_complexity_router import (
     set_current_routing_context,
     clear_current_routing_context,
     activate_model_tier,
+    configure_from_dict,
+    ensure_router_config_loaded,
+    get_model_for_task,
+    resolve_effective_model_route,
     _resolve_complexity,
 )
 
@@ -46,6 +53,11 @@ class MockAgent:
         self.client = None
         self._cached_system_prompt = None
         self.stream_delta_callback = None
+        self.api_mode = "chat_completions"
+        self._fallback_activated = False
+        self._fallback_index = 0
+        self._use_prompt_caching = False
+        self._use_native_cache_layout = False
 
 
 # ---------------------------------------------------------------------------
@@ -179,11 +191,106 @@ def test_thread_local_isolation():
     assert results["thread-B"]["complexity"] == "complex"
 
 
+def test_resolve_effective_model_route_user_override_wins():
+    clear_current_routing_context()
+    route = resolve_effective_model_route("@openai/gpt-5.4 帮我查看配置", record=False)
+    assert route.source == "user_override"
+    assert route.provider == "openai"
+    assert route.model == "gpt-5.4"
+    assert route.normalized_query == "帮我查看配置"
+    ctx = get_current_routing_context()
+    assert ctx["route_source"] == "user_override"
+    assert ctx["user_override"] == "openai/gpt-5.4"
+    clear_current_routing_context()
+
+
+def test_get_model_for_task_honors_explicit_override():
+    provider, model, decision = get_model_for_task(
+        "帮我分析代码",
+        user_override="kimi/kimi-k2.6",
+        config={},
+    )
+    assert provider == "kimi"
+    assert model == "kimi-k2.6"
+    assert decision.primary_signal == "user_override"
+
+
+def test_configure_from_dict_overrides_model_tiers():
+    configure_from_dict({
+        "task_complexity_router": {
+            "simple_tier": {"provider": "openai", "model": "gpt-4.1-mini"},
+            "complex_tier": {"provider": "anthropic", "model": "claude-sonnet-4"},
+        }
+    })
+    try:
+        simple = classify("查看配置", record=False)
+        complex_decision = classify("帮我调研 adaptive rag 的实现方案", record=False)
+        assert simple.suggested_provider == "openai"
+        assert simple.suggested_model == "gpt-4.1-mini"
+        assert complex_decision.suggested_provider == "anthropic"
+        assert complex_decision.suggested_model == "claude-sonnet-4"
+    finally:
+        configure_from_dict({})
+
+
+def test_ensure_router_config_loaded_applies_config_once():
+    ensure_router_config_loaded({
+        "task_complexity_router": {
+            "simple_tier": {"provider": "deepseek", "model": "deepseek-v4-flash"}
+        }
+    })
+    decision = classify("查看配置", record=False)
+    assert decision.suggested_provider == "deepseek"
+    assert decision.suggested_model == "deepseek-v4-flash"
+    configure_from_dict({})
+
+
+def test_activate_effective_route_updates_primary_runtime(monkeypatch):
+    class MockClient:
+        _base_url = "https://api.openai.com/v1"
+        base_url = "https://api.openai.com/v1"
+        api_key = "sk-test"
+
+    fake_aux = types.SimpleNamespace(
+        resolve_provider_client=lambda provider, model=None, raw_codex=False: (
+            MockClient(),
+            model or "gpt-5.4",
+        )
+    )
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", fake_aux)
+
+    agent = MockAgent()
+    route = EffectiveModelRoute(
+        provider="openai",
+        model="gpt-5.4",
+        source="user_override",
+        normalized_query="查看配置",
+        user_override="openai/gpt-5.4",
+        decision=RouteDecision(
+            complexity=Complexity.UNKNOWN,
+            primary_signal="user_override",
+            matched_rules=[],
+            suggested_model="gpt-5.4",
+            suggested_provider="openai",
+            reason="explicit override",
+        ),
+    )
+
+    changed = activate_effective_route(agent, route)
+    assert changed is True
+    assert agent.provider == "openai"
+    assert agent.model == "gpt-5.4"
+    assert agent._primary_runtime["provider"] == "openai"
+    assert agent._primary_runtime["model"] == "gpt-5.4"
+    assert agent._fallback_activated is False
+    assert agent._fallback_index == 0
+
+
 # ---------------------------------------------------------------------------
 # Per-query routing integration
 # ---------------------------------------------------------------------------
 
-def test_per_query_upgrade_simple_session_to_complex_tool():
+def test_per_query_upgrade_simple_session_to_complex_tool(monkeypatch):
     """Scenario: session starts with a simple query (MiniMax).
     LLM then decides to call write_file (FORCE_COMPLEX tool).
     The router must re-classify and upgrade to kimi-k2.6.
@@ -191,65 +298,62 @@ def test_per_query_upgrade_simple_session_to_complex_tool():
     This test exercises the full tool_executor per-query routing path:
     the re-classify → normalize → activate_model_tier pipeline.
     """
-    # Patch resolve_provider_client in auxiliary_client so kimi resolves
-    import agent.auxiliary_client as aux_client
-
     class MockKimiClient:
         _base_url = "https://api.kimi.com"
         base_url = "https://api.kimi.com"
         api_key = "mock-key"
 
     mock_client = MockKimiClient()
-    original_resolve = aux_client.resolve_provider_client
-    aux_client.resolve_provider_client = lambda p, model=None, raw_codex=False: (
-        (mock_client, model or "kimi-k2.6") if p == "kimi"
-        else original_resolve(p, model=model, raw_codex=raw_codex)
+    fake_aux = types.SimpleNamespace(
+        resolve_provider_client=lambda p, model=None, raw_codex=False: (
+            (mock_client, model or "kimi-k2.6")
+            if p == "kimi"
+            else (mock_client, model or "MiniMax-M2.7-highspeed")
+        )
     )
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", fake_aux)
 
-    try:
-        agent = MockAgent()
-        assert agent.model == "MiniMax-M2.7-highspeed"
-        assert agent.provider == "minimax-cn"
+    agent = MockAgent()
+    assert agent.model == "MiniMax-M2.7-highspeed"
+    assert agent.provider == "minimax-cn"
 
-        # Turn 1: user asks a simple question → classify as SIMPLE
-        clear_current_routing_context()
-        classify("帮我查下今天的天气", record=False)
-        ctx = get_current_routing_context()
-        assert ctx.get("complexity") == "simple"
+    # Turn 1: user asks a simple question → classify as SIMPLE
+    clear_current_routing_context()
+    resolve_effective_model_route("帮我查下今天的天气", record=False)
+    ctx = get_current_routing_context()
+    assert ctx.get("complexity") == "simple"
 
-        # Turn 2: LLM calls write_file → tool demands COMPLEX, session is SIMPLE
-        required_tier = get_tool_tier_for_upgrade("write_file")
-        assert required_tier == Complexity.COMPLEX
+    # Turn 2: LLM calls write_file → tool demands COMPLEX, session is SIMPLE
+    required_tier = get_tool_tier_for_upgrade("write_file")
+    assert required_tier == Complexity.COMPLEX
 
-        # Re-classify (produces FORCE_COMPLEX decision)
-        decision = classify(
-            "write_file with args {'path': '/tmp/test.py', 'content': 'print(1)'}",
-            tool_name="write_file",
-            tool_args={"path": "/tmp/test.py", "content": "print(1)"},
-        )
-        assert decision.suggested_model == "kimi-k2.6"
-        assert decision.suggested_provider == "kimi"
-        # Note: activate_model_tier blocks FORCE_COMPLEX directly.
-        # The tool_executor path normalizes before calling it.
-        # Simulate that normalization here:
-        from agent.task_complexity_router import _resolve_complexity
-        normalized = RouteDecision(
-            complexity=_resolve_complexity(decision.complexity),
-            primary_signal=decision.primary_signal,
-            matched_rules=decision.matched_rules,
-            suggested_model=decision.suggested_model,
-            suggested_provider=decision.suggested_provider,
-            reason=decision.reason,
-            latency_ms=getattr(decision, "latency_ms", 0.0),
-        )
-        result = activate_model_tier(agent, normalized)
-        assert result is True, "activate_model_tier should return True when provider resolves"
-        assert agent.model == "kimi-k2.6"
-        assert agent.provider == "kimi"
+    # Re-classify (produces FORCE_COMPLEX decision)
+    decision = classify(
+        "write_file with args {'path': '/tmp/test.py', 'content': 'print(1)'}",
+        tool_name="write_file",
+        tool_args={"path": "/tmp/test.py", "content": "print(1)"},
+    )
+    assert decision.suggested_model == "kimi-k2.6"
+    assert decision.suggested_provider == "kimi"
+    # Note: activate_model_tier blocks FORCE_COMPLEX directly.
+    # The tool_executor path normalizes before calling it.
+    # Simulate that normalization here:
+    from agent.task_complexity_router import _resolve_complexity
+    normalized = RouteDecision(
+        complexity=_resolve_complexity(decision.complexity),
+        primary_signal=decision.primary_signal,
+        matched_rules=decision.matched_rules,
+        suggested_model=decision.suggested_model,
+        suggested_provider=decision.suggested_provider,
+        reason=decision.reason,
+        latency_ms=getattr(decision, "latency_ms", 0.0),
+    )
+    result = activate_model_tier(agent, normalized)
+    assert result is True, "activate_model_tier should return True when provider resolves"
+    assert agent.model == "kimi-k2.6"
+    assert agent.provider == "kimi"
 
-        clear_current_routing_context()
-    finally:
-        aux_client.resolve_provider_client = original_resolve
+    clear_current_routing_context()
 
 
 def test_no_upgrade_when_already_complex():
@@ -259,7 +363,7 @@ def test_no_upgrade_when_already_complex():
     agent.provider = "kimi"
 
     clear_current_routing_context()
-    classify("帮我深度调研 adaptive rag 的实现方案", record=False)
+    resolve_effective_model_route("帮我深度调研 adaptive rag 的实现方案", record=False)
     ctx = get_current_routing_context()
     assert ctx.get("complexity") in ("complex", "force_complex")
 
@@ -278,7 +382,7 @@ def test_no_upgrade_when_already_complex():
 def test_no_upgrade_for_simple_tool_during_simple_session():
     """web_search is FORCE_SIMPLE — it should NOT trigger any model change."""
     clear_current_routing_context()
-    classify("帮我查下天气", record=False)
+    resolve_effective_model_route("帮我查下天气", record=False)
     ctx = get_current_routing_context()
     assert ctx.get("complexity") == "simple"
 

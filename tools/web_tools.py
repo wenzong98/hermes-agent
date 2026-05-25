@@ -294,6 +294,17 @@ def _web_requires_env() -> list[str]:
 
 
 DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION = 5000
+_BROWSER_FALLBACK_MIN_CONTENT_LENGTH = 200
+_BROWSER_FALLBACK_PLACEHOLDER_PATTERNS = (
+    r"enable\s+javascript",
+    r"checking\s+your\s+browser",
+    r"just\s+a\s+moment",
+    r"please\s+wait",
+    r"access\s+denied",
+    r"verification\s+required",
+    r"bot\s+detected",
+    r"\bloading(?:\s*\.\.\.)?\b",
+)
 
 def _is_nous_auxiliary_client(client: Any) -> bool:
     """Return True when the resolved auxiliary backend is Nous Portal."""
@@ -734,6 +745,124 @@ def clean_base64_images(text: str) -> str:
     return cleaned_text
 
 
+def _get_result_content(result: Dict[str, Any]) -> str:
+    """Return the raw extracted content for a provider result."""
+    return str(result.get("raw_content") or result.get("content") or "").strip()
+
+
+def _matches_browser_fallback_placeholder(content: str) -> bool:
+    """Detect obvious dynamic/placeholder pages that need a browser render."""
+    lowered = content.lower()
+    return any(
+        re.search(pattern, lowered, flags=re.IGNORECASE)
+        for pattern in _BROWSER_FALLBACK_PLACEHOLDER_PATTERNS
+    )
+
+
+def _should_fallback_to_browser(result: Dict[str, Any]) -> Optional[str]:
+    """Return a fallback reason when the extracted result should use the browser."""
+    if not result.get("url"):
+        return None
+
+    # Preserve hard security/policy blocks exactly as-is.
+    if result.get("blocked_by_policy"):
+        return None
+
+    error = str(result.get("error") or "").strip()
+    if error.lower().startswith("blocked:"):
+        return None
+    if error:
+        return "extract_error"
+
+    content = _get_result_content(result)
+    if not content:
+        return "empty_content"
+    if _matches_browser_fallback_placeholder(content):
+        return "dynamic_placeholder"
+    if len(content) < _BROWSER_FALLBACK_MIN_CONTENT_LENGTH:
+        return "content_too_short"
+    return None
+
+
+def _is_usable_browser_result(result: Dict[str, Any]) -> bool:
+    """Return True when browser extraction produced meaningful content."""
+    if not isinstance(result, dict):
+        return False
+    if result.get("blocked_by_policy"):
+        return False
+    if str(result.get("error") or "").strip():
+        return False
+    content = _get_result_content(result)
+    if not content:
+        return False
+    return not _matches_browser_fallback_placeholder(content)
+
+
+async def _extract_with_browser(url: str) -> Dict[str, Any]:
+    """Render a page in the browser and return extracted text content."""
+    from uuid import uuid4
+    from tools.browser_tool import browser_navigate, browser_snapshot, cleanup_browser
+
+    task_id = f"web-extract-fallback-{uuid4().hex}"
+    try:
+        nav_response = await asyncio.to_thread(browser_navigate, url, task_id)
+        nav_result = json.loads(nav_response)
+        if not nav_result.get("success"):
+            return {
+                "url": url,
+                "title": "",
+                "content": "",
+                "error": nav_result.get("error", "Browser navigation failed"),
+                **(
+                    {"blocked_by_policy": nav_result["blocked_by_policy"]}
+                    if "blocked_by_policy" in nav_result
+                    else {}
+                ),
+            }
+
+        snapshot_response = await asyncio.to_thread(
+            browser_snapshot, True, task_id, None
+        )
+        snapshot_result = json.loads(snapshot_response)
+
+        browser_content = ""
+        if snapshot_result.get("success"):
+            browser_content = str(snapshot_result.get("snapshot") or "").strip()
+
+        # Keep the compact auto-snapshot from navigation as a last resort.
+        if not browser_content:
+            browser_content = str(nav_result.get("snapshot") or "").strip()
+
+        if not browser_content:
+            return {
+                "url": nav_result.get("url", url),
+                "title": nav_result.get("title", ""),
+                "content": "",
+                "error": snapshot_result.get("error", "Browser extraction returned empty content"),
+            }
+
+        return {
+            "url": nav_result.get("url", url),
+            "title": nav_result.get("title", ""),
+            "content": browser_content,
+            "raw_content": browser_content,
+            "error": None,
+        }
+    except Exception as e:
+        logger.warning("Browser fallback failed for %s: %s", url, str(e)[:120])
+        return {
+            "url": url,
+            "title": "",
+            "content": "",
+            "error": f"Browser fallback failed: {str(e)}",
+        }
+    finally:
+        try:
+            await asyncio.to_thread(cleanup_browser, task_id)
+        except Exception:
+            logger.debug("Failed to clean up browser fallback session for %s", url)
+
+
 # ─── Exa / Parallel inline helpers — moved into plugins ──────────────────────
 # After PR #25182, the exa client + search/extract and parallel client +
 # search/extract helpers all live in their respective plugins:
@@ -900,6 +1029,7 @@ async def web_extract_tool(
         },
         "error": None,
         "pages_extracted": 0,
+        "pages_fallback_to_browser": 0,
         "pages_processed_with_llm": 0,
         "original_response_size": 0,
         "final_response_size": 0,
@@ -995,8 +1125,62 @@ async def web_extract_tool(
         if ssrf_blocked:
             results = ssrf_blocked + results
 
+        fallback_candidates = []
+        for index, result in enumerate(results):
+            fallback_reason = _should_fallback_to_browser(result)
+            if fallback_reason:
+                fallback_candidates.append((index, result, fallback_reason))
+
+        if fallback_candidates:
+            debug_call_data["processing_applied"].append("browser_fallback")
+
+            async def _fallback_single_result(
+                index: int, result: Dict[str, Any], fallback_reason: str
+            ) -> tuple[int, Dict[str, Any], str, Dict[str, Any]]:
+                browser_result = await _extract_with_browser(result.get("url", ""))
+                return index, result, fallback_reason, browser_result
+
+            fallback_results = await asyncio.gather(
+                *[
+                    _fallback_single_result(index, result, fallback_reason)
+                    for index, result, fallback_reason in fallback_candidates
+                ],
+                return_exceptions=True,
+            )
+
+            for fallback_item in fallback_results:
+                if isinstance(fallback_item, BaseException):
+                    logger.warning("Browser fallback task failed: %s", fallback_item)
+                    continue
+
+                index, original_result, fallback_reason, browser_result = fallback_item
+                if not _is_usable_browser_result(browser_result):
+                    logger.info(
+                        "Browser fallback did not improve %s (%s)",
+                        original_result.get("url", "Unknown URL"),
+                        fallback_reason,
+                    )
+                    continue
+
+                merged_result = dict(original_result)
+                merged_result.update(
+                    {
+                        "url": browser_result.get("url", original_result.get("url", "")),
+                        "title": browser_result.get("title", original_result.get("title", "")),
+                        "content": browser_result.get("content", ""),
+                        "raw_content": browser_result.get(
+                            "raw_content", browser_result.get("content", "")
+                        ),
+                        "error": None,
+                        "extraction_method": "browser",
+                        "fallback_reason": fallback_reason,
+                    }
+                )
+                results[index] = merged_result
+                debug_call_data["pages_fallback_to_browser"] += 1
+
         response = {"results": results}
-        
+
         pages_extracted = len(response.get('results', []))
         logger.info("Extracted content from %d pages", pages_extracted)
         
@@ -1094,7 +1278,9 @@ async def web_extract_tool(
                 "title": r.get("title", ""),
                 "content": r.get("content", ""),
                 "error": r.get("error"),
-                **({  "blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
+                **({"blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
+                **({"extraction_method": r["extraction_method"]} if "extraction_method" in r else {}),
+                **({"fallback_reason": r["fallback_reason"]} if "fallback_reason" in r else {}),
             }
             for r in response.get("results", [])
         ]
