@@ -138,8 +138,10 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("footer", "Toggle gateway runtime-metadata footer on final replies",
                "Configuration", args_hint="[on|off|status]",
                subcommands=("on", "off", "status")),
-    CommandDef("yolo", "Toggle YOLO mode (skip all dangerous command approvals)",
-               "Configuration"),
+    CommandDef("router", "Toggle task complexity router (auto model selection)", "Configuration",
+               args_hint="[on|off|status]",
+               subcommands=("on", "off", "status")),
+    CommandDef("yolo", "Toggle YOLO mode (skip all dangerous command approvals)", "Configuration"),
     CommandDef("reasoning", "Manage reasoning effort and display", "Configuration",
                args_hint="[level|show|hide]",
                subcommands=("none", "minimal", "low", "medium", "high", "xhigh", "show", "hide", "on", "off")),
@@ -342,6 +344,7 @@ ACTIVE_SESSION_BYPASS_COMMANDS: frozenset[str] = frozenset(
         "profile",
         "queue",
         "restart",
+        "router",
         "status",
         "steer",
         "stop",
@@ -1817,3 +1820,71 @@ def _file_size_label(path: str) -> str:
     if size < 1024 * 1024 * 1024:
         return f"{size / (1024 * 1024):.1f}M"
     return f"{size / (1024 * 1024 * 1024):.1f}G"
+
+
+# ---------------------------------------------------------------------------
+# Task Complexity Router global toggle (persistent)
+# ---------------------------------------------------------------------------
+
+import threading
+
+from hermes_constants import get_hermes_home
+
+_router_disabled_lock = threading.Lock()
+_router_disabled_cache: bool | None = None  # None = not yet loaded
+
+
+def _router_disabled(value: bool | None = None) -> bool:
+    """Get or set the router disabled flag. Thread-safe, persists to config.yaml.
+
+    When value is None (default): returns current state.
+    When value is True/False: sets new state and returns the new value.
+    """
+    global _router_disabled_cache
+
+    # ── Read path (no lock needed for cached read) ──────────────────────────
+    if value is None and _router_disabled_cache is not None:
+        return _router_disabled_cache
+
+    with _router_disabled_lock:
+        if value is None:
+            # Re-read from config
+            import yaml
+            cfg_path = get_hermes_home() / "config.yaml"
+            try:
+                if cfg_path.exists():
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cfg = yaml.safe_load(f) or {}
+                else:
+                    cfg = {}
+            except Exception:
+                cfg = {}
+            _router_disabled_cache = cfg.get("task_complexity_router_disabled", False)
+            return _router_disabled_cache
+
+        # ── Write path ──────────────────────────────────────────────────────
+        import yaml
+
+        _router_disabled_cache = bool(value)
+
+        cfg_path = get_hermes_home() / "config.yaml"
+        try:
+            if cfg_path.exists():
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+            else:
+                cfg = {}
+        except Exception:
+            cfg = {}
+
+        cfg["task_complexity_router_disabled"] = bool(value)
+
+        # Atomic write via atomic_yaml_write if available, else fallback
+        try:
+            from hermes_cli.config import atomic_yaml_write
+            atomic_yaml_write(cfg_path, cfg)
+        except Exception:
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(cfg, f, default_flow_style=False)
+
+        return _router_disabled_cache

@@ -8318,6 +8318,8 @@ class HermesCLI:
             self._toggle_verbose()
         elif canonical == "footer":
             self._handle_footer_command(cmd_original)
+        elif canonical == "router":
+            self._handle_router_command(cmd_original)
         elif canonical == "yolo":
             self._toggle_yolo()
         elif canonical == "reasoning":
@@ -9365,6 +9367,48 @@ class HermesCLI:
             _cprint(f"  Runtime footer: {state}")
         else:
             _cprint("  Failed to save runtime_footer setting to config.yaml")
+
+    def _handle_router_command(self, cmd_original: str) -> None:
+        """Toggle or inspect the task complexity router from the CLI.
+
+        Usage:
+            /router on|off|status
+            /router        → toggle
+        """
+        from hermes_cli.commands import _router_disabled
+        from hermes_cli.colors import Colors as _Colors
+
+        # Parse arg
+        arg = ""
+        try:
+            parts = (cmd_original or "").strip().split(None, 1)
+            if len(parts) > 1:
+                arg = parts[1].strip().lower()
+        except Exception:
+            arg = ""
+
+        current = _router_disabled()
+
+        if arg in {"status", "?"}:
+            state = f"{_Colors.DIM}disabled{_Colors.RESET}" if current else f"{_Colors.GREEN}enabled{_Colors.RESET}"
+            _cprint(f"  {_Colors.BOLD}Router:{_Colors.RESET} {state}")
+            _cprint(f"  Task complexity routing is {'disabled' if current else 'active'}.")
+            return
+
+        if arg in {"on", "enable", "true", "1"}:
+            new_state = False
+        elif arg in {"off", "disable", "false", "0"}:
+            new_state = True
+        elif arg == "":
+            new_state = not current
+        else:
+            _cprint("  Usage: /router [on|off|status]")
+            return
+
+        _router_disabled(new_state)
+        state = f"{_Colors.DIM}disabled{_Colors.RESET}" if new_state else f"{_Colors.GREEN}enabled{_Colors.RESET}"
+        _cprint(f"  {_Colors.BOLD}Router:{_Colors.RESET} {state}")
+        _cprint(f"  Task complexity routing is now {'disabled' if new_state else 'active'}.")
 
     def _toggle_verbose(self):
         """Cycle tool progress mode: off → new → all → verbose → off.

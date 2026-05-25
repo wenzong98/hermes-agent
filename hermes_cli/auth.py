@@ -3421,6 +3421,51 @@ def resolve_codex_runtime_credentials(
         or DEFAULT_CODEX_BASE_URL
     )
 
+    # Guard: if resolve_codex_runtime_credentials is called inside a
+    # ThreadPoolExecutor worker thread (e.g. a subagent's AIAgent.run_conversation
+    # call, where Hermes's own token store needs refreshing), the flock-based
+    # _auth_store_lock is UNSAFE — worker threads share the process-level PID and
+    # their exit path runs .close() on shared httpx clients, which races with any
+    # in-flight lock holder that is another thread in the same process.
+    #
+    # Detect the worker-thread context by checking whether we are running inside
+    # a ThreadPoolExecutor worker (the thread's name matches the pattern used by
+    # concurrent.futures ThreadPoolExecutor workers).  In that case, fall back to
+    # using whatever tokens are already in memory without blocking on the lock.
+    # The parent thread that originally resolved the credentials will have set
+    # api_key on the child agent at construction time; a stale-but-present token
+    # is far better than a deadlock that kills the entire delegation timeout window.
+    import threading
+    _td = threading.current_thread()
+    _is_worker_thread = (
+        getattr(_td, "name", "") or ""
+    ).startswith("ThreadPoolExecutor-worker-")
+    if _is_worker_thread:
+        from hermes_cli.auth import _read_codex_tokens as _unsafe_read
+        try:
+            _tok_data = _unsafe_read(_lock=False)
+            _tok_access = str(_tok_data.get("tokens", {}).get("access_token", "") or "").strip()
+            if _tok_access:
+                return {
+                    "provider": "openai-codex",
+                    "base_url": base_url,
+                    "api_key": _tok_access,
+                    "source": "hermes-auth-store",
+                    "last_refresh": _tok_data.get("last_refresh"),
+                    "auth_mode": "chatgpt",
+                }
+        except Exception:
+            pass
+        # Even if read failed, return whatever we had on entry — don't block
+        return {
+            "provider": "openai-codex",
+            "base_url": base_url,
+            "api_key": access_token,
+            "source": "hermes-auth-store",
+            "last_refresh": None,
+            "auth_mode": "chatgpt",
+        }
+
     return {
         "provider": "openai-codex",
         "base_url": base_url,

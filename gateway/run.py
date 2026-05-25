@@ -7108,13 +7108,15 @@ class GatewayRunner:
             # /fast and /reasoning are config-only and take effect next
             # message, so they fall through to the catch-all busy response
             # below — users should wait and set them between turns.
-            if _cmd_def_inner and _cmd_def_inner.name in {"yolo", "verbose"}:
+            if _cmd_def_inner and _cmd_def_inner.name in {"yolo", "verbose", "footer", "router"}:
                 if _cmd_def_inner.name == "yolo":
                     return await self._handle_yolo_command(event)
                 if _cmd_def_inner.name == "verbose":
                     return await self._handle_verbose_command(event)
                 if _cmd_def_inner.name == "footer":
                     return await self._handle_footer_command(event)
+                if _cmd_def_inner.name == "router":
+                    return await self._handle_router_command(event)
 
             # Gateway-handled info/control commands with dedicated
             # running-agent handlers.
@@ -7391,6 +7393,9 @@ class GatewayRunner:
 
         if canonical == "footer":
             return await self._handle_footer_command(event)
+
+        if canonical == "router":
+            return await self._handle_router_command(event)
 
         if canonical == "yolo":
             return await self._handle_yolo_command(event)
@@ -12046,6 +12051,48 @@ class GatewayRunner:
                 example = t("gateway.footer.example_line", preview=preview)
         return t("gateway.footer.saved", state=state, example=example)
 
+    async def _handle_router_command(self, event: MessageEvent) -> str:
+        """Handle /router command — toggle task complexity router.
+
+        Usage:
+            /router on   → enable router
+            /router off   → disable router
+            /router       → toggle
+            /router status → show current state
+        """
+        from hermes_cli.commands import _router_disabled
+
+        # Parse arg
+        arg = ""
+        try:
+            text = (getattr(event, "message", None) or "").strip()
+            if text.startswith("/"):
+                parts = text.split(None, 1)
+                if len(parts) > 1:
+                    arg = parts[1].strip().lower()
+        except Exception:
+            arg = ""
+
+        current = _router_disabled()
+
+        if arg in {"status", "?"}:
+            state = "disabled" if current else "enabled"
+            return f"🤖 Router: **{state}**\nTask complexity routing is {'disabled' if current else 'active'}."
+
+        if arg in {"on", "enable", "true", "1"}:
+            new_state = False
+        elif arg in {"off", "disable", "false", "0"}:
+            new_state = True
+        elif arg == "":
+            new_state = not current
+        else:
+            return "Usage: /router [on|off|status]"
+
+        _router_disabled(new_state)
+        state = "disabled" if new_state else "enabled"
+        action = "Disabled" if new_state else "Enabled"
+        return f"🤖 Router: **{action}**\nTask complexity routing is now {state}."
+
     async def _handle_compress_command(self, event: MessageEvent) -> str:
         """Handle /compress command -- manually compress conversation context.
 
@@ -16531,6 +16578,12 @@ class GatewayRunner:
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
+            # Apply global task complexity router toggle (set via /router command)
+            try:
+                from hermes_cli.commands import _router_disabled
+                agent._task_complexity_router_disabled = _router_disabled()
+            except Exception:
+                pass
 
             _bg_review_release = threading.Event()
             _bg_review_pending: list[str] = []
