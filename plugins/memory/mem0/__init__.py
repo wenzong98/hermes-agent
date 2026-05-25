@@ -1,16 +1,11 @@
 """Mem0 memory plugin — MemoryProvider interface.
 
-Server-side LLM fact extraction, semantic search with reranking, and
-automatic deduplication via the Mem0 Platform API.
+Supports two backends:
+- Local library mode: MiniMax + FastEmbed + local ChromaDB via ``mem0.Memory``
+- Cloud mode: Mem0 Platform API via ``mem0.MemoryClient``
 
-Original PR #2933 by kartik-mem0, adapted to MemoryProvider ABC.
-
-Config via environment variables:
-  MEM0_API_KEY       — Mem0 Platform API key (required)
-  MEM0_USER_ID       — User identifier (default: hermes-user)
-  MEM0_AGENT_ID      — Agent identifier (default: hermes)
-
-Or via $HERMES_HOME/mem0.json.
+Local mode is activated by ``local_mode: true`` in ``$HERMES_HOME/mem0.json``
+or ``MEM0_LOCAL_MODE=true`` in the environment.
 """
 
 from __future__ import annotations
@@ -20,6 +15,7 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
@@ -41,25 +37,34 @@ def _load_config() -> dict:
     """Load config from env vars, with $HERMES_HOME/mem0.json overrides.
 
     Environment variables provide defaults; mem0.json (if present) overrides
-    individual keys.  This avoids a silent failure when the JSON file exists
-    but is missing fields like ``api_key`` that the user set in ``.env``.
+    individual keys. This avoids silent failures when the JSON file exists but
+    only stores local-mode settings while secrets live in ``~/.hermes/.env``.
     """
     from hermes_constants import get_hermes_home
 
     config = {
+        # Cloud mode
         "api_key": os.environ.get("MEM0_API_KEY", ""),
+        # Shared
         "user_id": os.environ.get("MEM0_USER_ID", "hermes-user"),
         "agent_id": os.environ.get("MEM0_AGENT_ID", "hermes"),
         "rerank": True,
         "keyword_search": False,
+        # Local mode
+        "local_mode": os.environ.get("MEM0_LOCAL_MODE", "false").lower() == "true",
+        "minimax_api_key": os.environ.get("MINIMAX_API_KEY", ""),
+        "minimax_base_url": os.environ.get("MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic"),
+        "minimax_model": os.environ.get("MEM0_MINIMAX_MODEL", "MiniMax-M2.7"),
+        "chroma_path": os.environ.get("MEM0_CHROMA_PATH", "/tmp/mem0_chroma"),
+        "collection_name": os.environ.get("MEM0_COLLECTION", "hermes_memories"),
+        "embedder_model": os.environ.get("MEM0_EMBEDDER_MODEL", "BAAI/bge-base-en-v1.5"),
     }
 
     config_path = get_hermes_home() / "mem0.json"
     if config_path.exists():
         try:
             file_cfg = json.loads(config_path.read_text(encoding="utf-8"))
-            config.update({k: v for k, v in file_cfg.items()
-                           if v is not None and v != ""})
+            config.update({k: v for k, v in file_cfg.items() if v is not None and v != ""})
         except Exception:
             pass
 
@@ -117,16 +122,18 @@ CONCLUDE_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 class Mem0MemoryProvider(MemoryProvider):
-    """Mem0 Platform memory with server-side extraction and semantic search."""
+    """Mem0 memory provider supporting both local and cloud backends."""
 
     def __init__(self):
         self._config = None
-        self._client = None
+        self._client = None  # cloud MemoryClient
+        self._memory = None  # local Memory instance
         self._client_lock = threading.Lock()
         self._api_key = ""
         self._user_id = "hermes-user"
         self._agent_id = "hermes"
         self._rerank = True
+        self._local_mode = False
         self._prefetch_result = ""
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread = None
@@ -141,12 +148,12 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         cfg = _load_config()
+        if cfg.get("local_mode"):
+            return bool(cfg.get("minimax_api_key"))
         return bool(cfg.get("api_key"))
 
     def save_config(self, values, hermes_home):
         """Write config to $HERMES_HOME/mem0.json."""
-        import json
-        from pathlib import Path
         config_path = Path(hermes_home) / "mem0.json"
         existing = {}
         if config_path.exists():
@@ -159,14 +166,59 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def get_config_schema(self):
         return [
-            {"key": "api_key", "description": "Mem0 Platform API key", "secret": True, "required": True, "env_var": "MEM0_API_KEY", "url": "https://app.mem0.ai"},
+            {"key": "local_mode", "description": "Use local Mem0 library mode (MiniMax + FastEmbed + ChromaDB)", "default": "false", "choices": ["true", "false"]},
+            {"key": "api_key", "description": "Mem0 Platform API key (cloud mode)", "secret": True, "required": False, "env_var": "MEM0_API_KEY", "url": "https://app.mem0.ai"},
+            {"key": "minimax_api_key", "description": "MiniMax API key (local mode)", "secret": True, "required": False, "env_var": "MINIMAX_API_KEY"},
+            {"key": "minimax_base_url", "description": "MiniMax API base URL", "default": "https://api.minimaxi.com/anthropic"},
+            {"key": "chroma_path", "description": "Local ChromaDB path", "default": "/tmp/mem0_chroma"},
+            {"key": "collection_name", "description": "ChromaDB collection name", "default": "hermes_memories"},
             {"key": "user_id", "description": "User identifier", "default": "hermes-user"},
             {"key": "agent_id", "description": "Agent identifier", "default": "hermes"},
             {"key": "rerank", "description": "Enable reranking for recall", "default": "true", "choices": ["true", "false"]},
         ]
 
-    def _get_client(self):
-        """Thread-safe client accessor with lazy initialization."""
+    def _local_memory_config(self) -> Dict[str, Any]:
+        cfg = self._config or _load_config()
+        return {
+            "llm": {
+                "provider": "minimax",
+                "config": {
+                    "model": cfg.get("minimax_model", "MiniMax-M2.7"),
+                    "api_key": cfg.get("minimax_api_key", "") or os.environ.get("MINIMAX_API_KEY", ""),
+                    "minimax_base_url": cfg.get("minimax_base_url", "https://api.minimaxi.com/anthropic"),
+                },
+            },
+            "embedder": {
+                "provider": "fastembed",
+                "config": {
+                    "model": cfg.get("embedder_model", "BAAI/bge-base-en-v1.5"),
+                },
+            },
+            "vector_store": {
+                "provider": "chroma",
+                "config": {
+                    "collection_name": cfg.get("collection_name", "hermes_memories"),
+                    "path": cfg.get("chroma_path", "/tmp/mem0_chroma"),
+                },
+            },
+        }
+
+    def _get_local_memory(self):
+        """Thread-safe local Memory accessor with lazy initialization."""
+        with self._client_lock:
+            if self._memory is not None:
+                return self._memory
+            try:
+                from mem0 import Memory
+            except ImportError as e:
+                raise RuntimeError(
+                    "mem0 local mode requires mem0ai/chromadb/fastembed. Run: pip install mem0ai chromadb fastembed"
+                ) from e
+            self._memory = Memory.from_config(self._local_memory_config())
+            return self._memory
+
+    def _get_cloud_client(self):
+        """Thread-safe cloud client accessor with lazy initialization."""
         with self._client_lock:
             if self._client is not None:
                 return self._client
@@ -174,8 +226,14 @@ class Mem0MemoryProvider(MemoryProvider):
                 from mem0 import MemoryClient
                 self._client = MemoryClient(api_key=self._api_key)
                 return self._client
-            except ImportError:
-                raise RuntimeError("mem0 package not installed. Run: pip install mem0ai")
+            except ImportError as e:
+                raise RuntimeError("mem0 package not installed. Run: pip install mem0ai") from e
+
+    def _get_client(self):
+        """Return the active backend client (local Memory or cloud MemoryClient)."""
+        if self._local_mode:
+            return self._get_local_memory()
+        return self._get_cloud_client()
 
     def _is_breaker_open(self) -> bool:
         """Return True if the circuit breaker is tripped (too many failures)."""
@@ -197,17 +255,27 @@ class Mem0MemoryProvider(MemoryProvider):
             logger.warning(
                 "Mem0 circuit breaker tripped after %d consecutive failures. "
                 "Pausing API calls for %ds.",
-                self._consecutive_failures, _BREAKER_COOLDOWN_SECS,
+                self._consecutive_failures,
+                _BREAKER_COOLDOWN_SECS,
             )
 
     def initialize(self, session_id: str, **kwargs) -> None:
         self._config = _load_config()
+        self._local_mode = bool(self._config.get("local_mode", False))
         self._api_key = self._config.get("api_key", "")
         # Prefer gateway-provided user_id for per-user memory scoping;
         # fall back to config/env default for CLI (single-user) sessions.
         self._user_id = kwargs.get("user_id") or self._config.get("user_id", "hermes-user")
         self._agent_id = self._config.get("agent_id", "hermes")
         self._rerank = self._config.get("rerank", True)
+
+        # Eagerly validate local mode so startup fails loudly if dependencies/config are wrong.
+        if self._local_mode:
+            self._get_local_memory()
+            logger.info(
+                "Mem0 local mode initialized (MiniMax + FastEmbed + ChromaDB at %s)",
+                self._config.get("chroma_path", "/tmp/mem0_chroma"),
+            )
 
     def _read_filters(self) -> Dict[str, Any]:
         """Filters for search/get_all — scoped to user only for cross-session recall."""
@@ -219,7 +287,10 @@ class Mem0MemoryProvider(MemoryProvider):
 
     @staticmethod
     def _unwrap_results(response: Any) -> list:
-        """Normalize Mem0 API response — v2 wraps results in {"results": [...]}."""
+        """Normalize Mem0 API response — v2 wraps results in {"results": [...]}.
+
+        The local ``Memory`` backend also returns the same shape in mem0ai v2.
+        """
         if isinstance(response, dict):
             return response.get("results", [])
         if isinstance(response, list):
@@ -227,9 +298,10 @@ class Mem0MemoryProvider(MemoryProvider):
         return []
 
     def system_prompt_block(self) -> str:
+        backend = "local" if self._local_mode else "cloud"
         return (
             "# Mem0 Memory\n"
-            f"Active. User: {self._user_id}.\n"
+            f"Active ({backend}). User: {self._user_id}.\n"
             "Use mem0_search to find memories, mem0_conclude to store facts, "
             "mem0_profile for a full overview."
         )
@@ -251,12 +323,14 @@ class Mem0MemoryProvider(MemoryProvider):
         def _run():
             try:
                 client = self._get_client()
-                results = self._unwrap_results(client.search(
-                    query=query,
-                    filters=self._read_filters(),
-                    rerank=self._rerank,
-                    top_k=5,
-                ))
+                results = self._unwrap_results(
+                    client.search(
+                        query=query,
+                        filters=self._read_filters(),
+                        rerank=self._rerank,
+                        top_k=5,
+                    )
+                )
                 if results:
                     lines = [r.get("memory", "") for r in results if r.get("memory")]
                     with self._prefetch_lock:
@@ -270,7 +344,7 @@ class Mem0MemoryProvider(MemoryProvider):
         self._prefetch_thread.start()
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Send the turn to Mem0 for server-side fact extraction (non-blocking)."""
+        """Send the turn to Mem0 for fact extraction (non-blocking)."""
         if self._is_breaker_open():
             return
 
@@ -299,9 +373,11 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._is_breaker_open():
-            return json.dumps({
-                "error": "Mem0 API temporarily unavailable (multiple consecutive failures). Will retry automatically."
-            })
+            return json.dumps(
+                {
+                    "error": "Mem0 API temporarily unavailable (multiple consecutive failures). Will retry automatically."
+                }
+            )
 
         try:
             client = self._get_client()
@@ -327,12 +403,14 @@ class Mem0MemoryProvider(MemoryProvider):
             rerank = args.get("rerank", False)
             top_k = min(int(args.get("top_k", 10)), 50)
             try:
-                results = self._unwrap_results(client.search(
-                    query=query,
-                    filters=self._read_filters(),
-                    rerank=rerank,
-                    top_k=top_k,
-                ))
+                results = self._unwrap_results(
+                    client.search(
+                        query=query,
+                        filters=self._read_filters(),
+                        rerank=rerank,
+                        top_k=top_k,
+                    )
+                )
                 self._record_success()
                 if not results:
                     return json.dumps({"result": "No relevant memories found."})
@@ -366,6 +444,7 @@ class Mem0MemoryProvider(MemoryProvider):
                 t.join(timeout=5.0)
         with self._client_lock:
             self._client = None
+            self._memory = None
 
 
 def register(ctx) -> None:
