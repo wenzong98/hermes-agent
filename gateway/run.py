@@ -1646,6 +1646,7 @@ class GatewayRunner:
     _stop_task: Optional[asyncio.Task] = None
     _session_model_overrides: Dict[str, Dict[str, str]] = {}
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
+    _session_router_overrides: Dict[str, bool] = {}
 
     def __init__(self, config: Optional[GatewayConfig] = None):
         global _gateway_runner_ref
@@ -1734,6 +1735,9 @@ class GatewayRunner:
         # Per-session reasoning effort overrides from /reasoning.
         # Key: session_key, Value: parsed reasoning config dict.
         self._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
+        # Per-session router overrides from /router.
+        # Key: session_key, Value: router disabled flag.
+        self._session_router_overrides: Dict[str, bool] = {}
         self._kanban_notifier_profile = self._active_profile_name()
         # Teams meeting pipeline runtime (bound later when msgraph_webhook adapter exists).
         self._teams_pipeline_runtime = None
@@ -2339,6 +2343,31 @@ class GatewayRunner:
                 resolved_session_key = None
 
         model = _resolve_gateway_model(user_config)
+        platform_model_cfg = {}
+        platform_runtime_override = None
+        platform_key = None
+        if source is not None:
+            platform_key = _platform_config_key(source.platform)
+            platform_model_cfg = (
+                user_config.get("platform", {}).get(platform_key, {}).get("model", {})
+                if user_config else {}
+            )
+            if not isinstance(platform_model_cfg, dict):
+                platform_model_cfg = {}
+
+        # Platform-specific model config takes precedence for gateway sessions.
+        # This allows CLI and messaging platforms to use different defaults
+        # (e.g. CLI -> gpt-5.4, Telegram -> MiniMax) without relying on
+        # session-scoped /model overrides.
+        if platform_model_cfg:
+            plat_model = platform_model_cfg.get("default") or platform_model_cfg.get("model") or ""
+            if plat_model:
+                logger.debug(
+                    "Platform model override: platform=%s model=%s (was %s)",
+                    platform_key, plat_model,
+                    model,
+                )
+                model = plat_model
         override = self._session_model_overrides.get(resolved_session_key) if resolved_session_key else None
         if override:
             override_model = override.get("model", model)
@@ -2368,7 +2397,39 @@ class GatewayRunner:
                 list(self._session_model_overrides.keys())[:5] if self._session_model_overrides else "[]",
             )
 
-        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        if not override and platform_model_cfg:
+            try:
+                from hermes_cli.runtime_provider import resolve_runtime_provider
+
+                platform_runtime = resolve_runtime_provider(
+                    requested=(platform_model_cfg.get("provider") or None),
+                    explicit_api_key=(platform_model_cfg.get("api_key") or None),
+                    explicit_base_url=(platform_model_cfg.get("base_url") or None),
+                    target_model=(model or None),
+                )
+                platform_runtime_override = {
+                    "api_key": platform_runtime.get("api_key"),
+                    "base_url": platform_runtime.get("base_url"),
+                    "provider": platform_runtime.get("provider"),
+                    "api_mode": platform_runtime.get("api_mode"),
+                    "command": platform_runtime.get("command"),
+                    "args": list(platform_runtime.get("args") or []),
+                    "credential_pool": platform_runtime.get("credential_pool"),
+                }
+                logger.debug(
+                    "Platform runtime override: platform=%s provider=%s model=%s",
+                    platform_key,
+                    platform_runtime_override.get("provider"),
+                    model,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Platform runtime override failed for platform=%s: %s",
+                    platform_key,
+                    exc,
+                )
+
+        runtime_kwargs = platform_runtime_override or _resolve_runtime_agent_kwargs()
         runtime_model = runtime_kwargs.pop("model", None)
         if runtime_model:
             logger.info(
@@ -2838,6 +2899,28 @@ class GatewayRunner:
                 value_tokens.append(token)
         return " ".join(value_tokens).strip().lower(), persist_global
 
+    @staticmethod
+    def _parse_router_command_args(raw_args: str) -> tuple[str, bool]:
+        """Parse `/router` args into `(value, persist_global)`."""
+        import shlex
+
+        text = str(raw_args or "").strip().replace("—", "--")
+        if not text:
+            return "", False
+        try:
+            tokens = shlex.split(text)
+        except ValueError:
+            tokens = text.split()
+
+        persist_global = False
+        value_tokens = []
+        for token in tokens:
+            if token == "--global":
+                persist_global = True
+            else:
+                value_tokens.append(token)
+        return " ".join(value_tokens).strip().lower(), persist_global
+
     def _resolve_session_reasoning_config(
         self,
         *,
@@ -2871,6 +2954,42 @@ class GatewayRunner:
             self._session_reasoning_overrides.pop(session_key, None)
         else:
             self._session_reasoning_overrides[session_key] = dict(reasoning_config)
+
+    def _resolve_session_router_disabled(
+        self,
+        *,
+        source: Optional[SessionSource] = None,
+        session_key: Optional[str] = None,
+    ) -> bool:
+        """Resolve router disabled state for a session, honoring session overrides."""
+        from hermes_cli.commands import _router_disabled
+
+        resolved_session_key = session_key
+        if not resolved_session_key and source is not None:
+            try:
+                resolved_session_key = self._session_key_for_source(source)
+            except Exception:
+                resolved_session_key = None
+
+        overrides = getattr(self, "_session_router_overrides", {}) or {}
+        if resolved_session_key and resolved_session_key in overrides:
+            return bool(overrides[resolved_session_key])
+        return bool(_router_disabled())
+
+    def _set_session_router_override(
+        self,
+        session_key: str,
+        router_disabled: Optional[bool],
+    ) -> None:
+        """Set or clear the session-scoped router override."""
+        if not session_key:
+            return
+        if not hasattr(self, "_session_router_overrides"):
+            self._session_router_overrides = {}
+        if router_disabled is None:
+            self._session_router_overrides.pop(session_key, None)
+        else:
+            self._session_router_overrides[session_key] = bool(router_disabled)
 
     @staticmethod
     def _load_service_tier() -> str | None:
@@ -8065,10 +8184,11 @@ class GatewayRunner:
         if getattr(session_entry, "was_auto_reset", False):
             # Treat auto-reset as a full conversation boundary — drop every
             # session-scoped transient state so the fresh session does not
-            # inherit the previous conversation's model/reasoning overrides
+            # inherit the previous conversation's model/reasoning/router overrides
             # or a queued "/model switched" note.
             self._session_model_overrides.pop(session_key, None)
             self._set_session_reasoning_override(session_key, None)
+            self._set_session_router_override(session_key, None)
             if hasattr(self, "_pending_model_notes"):
                 self._pending_model_notes.pop(session_key, None)
         
@@ -8845,6 +8965,7 @@ class GatewayRunner:
                 self._evict_cached_agent(session_key)
                 self._session_model_overrides.pop(session_key, None)
                 self._set_session_reasoning_override(session_key, None)
+                self._set_session_router_override(session_key, None)
                 if hasattr(self, "_pending_model_notes"):
                     self._pending_model_notes.pop(session_key, None)
                 response = (response or "") + (
@@ -9222,10 +9343,11 @@ class GatewayRunner:
         # Reset the session
         new_entry = self.session_store.reset_session(session_key)
 
-        # Clear any session-scoped model/reasoning overrides so the next agent
+        # Clear any session-scoped model/reasoning/router overrides so the next agent
         # picks up configured defaults instead of previous session switches.
         self._session_model_overrides.pop(session_key, None)
         self._set_session_reasoning_override(session_key, None)
+        self._set_session_router_override(session_key, None)
         if hasattr(self, "_pending_model_notes"):
             self._pending_model_notes.pop(session_key, None)
 
@@ -12052,46 +12174,72 @@ class GatewayRunner:
         return t("gateway.footer.saved", state=state, example=example)
 
     async def _handle_router_command(self, event: MessageEvent) -> str:
-        """Handle /router command — toggle task complexity router.
+        """Handle /router command — manage task complexity router state.
 
         Usage:
-            /router on   → enable router
-            /router off   → disable router
-            /router       → toggle
-            /router status → show current state
+            /router                       Show current effective state
+            /router on                    Enable router for this session only
+            /router off                   Disable router for this session only
+            /router reset                 Clear this session override
+            /router on|off --global       Persist router state to config.yaml
+            /router status                Show current effective state
         """
         from hermes_cli.commands import _router_disabled
 
-        # Parse arg
-        arg = ""
-        try:
-            text = (getattr(event, "message", None) or "").strip()
-            if text.startswith("/"):
-                parts = text.split(None, 1)
-                if len(parts) > 1:
-                    arg = parts[1].strip().lower()
-        except Exception:
-            arg = ""
+        raw_args = event.get_command_args().strip()
+        arg, persist_global = self._parse_router_command_args(raw_args)
+        session_key = self._session_key_for_source(event.source)
+        current = self._resolve_session_router_disabled(
+            source=event.source,
+            session_key=session_key,
+        )
+        has_session_override = session_key in (getattr(self, "_session_router_overrides", {}) or {})
 
-        current = _router_disabled()
-
-        if arg in {"status", "?"}:
+        if not raw_args or arg in {"status", "?"}:
             state = "disabled" if current else "enabled"
-            return f"🤖 Router: **{state}**\nTask complexity routing is {'disabled' if current else 'active'}."
+            scope = "session" if has_session_override else "global"
+            return (
+                f"🤖 Router: **{state}**\n"
+                f"Task complexity routing is {'disabled' if current else 'active'}.\n"
+                f"Scope: `{scope}`."
+            )
+
+        if arg == "reset":
+            if persist_global:
+                return "Usage: /router reset (session only)"
+            self._set_session_router_override(session_key, None)
+            self._evict_cached_agent(session_key)
+            current = _router_disabled()
+            state = "disabled" if current else "enabled"
+            return (
+                f"🤖 Router override cleared\n"
+                f"Task complexity routing is now {state} for this session (using global default)."
+            )
 
         if arg in {"on", "enable", "true", "1"}:
             new_state = False
         elif arg in {"off", "disable", "false", "0"}:
             new_state = True
-        elif arg == "":
-            new_state = not current
         else:
-            return "Usage: /router [on|off|status]"
+            return "Usage: /router [on|off|reset|status] [--global]"
 
-        _router_disabled(new_state)
+        if persist_global:
+            _router_disabled(new_state)
+            self._set_session_router_override(session_key, None)
+            self._evict_cached_agent(session_key)
+            state = "disabled" if new_state else "enabled"
+            return (
+                f"🤖 Router: **{state}**\n"
+                "Task complexity routing default saved to config and takes effect on next message."
+            )
+
+        self._set_session_router_override(session_key, new_state)
+        self._evict_cached_agent(session_key)
         state = "disabled" if new_state else "enabled"
-        action = "Disabled" if new_state else "Enabled"
-        return f"🤖 Router: **{action}**\nTask complexity routing is now {state}."
+        return (
+            f"🤖 Router: **{state}**\n"
+            "Task complexity routing updated for this session only and takes effect on next message."
+        )
 
     async def _handle_compress_command(self, event: MessageEvent) -> str:
         """Handle /compress command -- manually compress conversation context.
@@ -16578,10 +16726,12 @@ class GatewayRunner:
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
-            # Apply global task complexity router toggle (set via /router command)
+            # Apply effective task complexity router toggle for this session.
             try:
-                from hermes_cli.commands import _router_disabled
-                agent._task_complexity_router_disabled = _router_disabled()
+                agent._task_complexity_router_disabled = self._resolve_session_router_disabled(
+                    source=source,
+                    session_key=session_key,
+                )
             except Exception:
                 pass
 
