@@ -893,7 +893,7 @@ async def test_router_dm_root_auto_detect_persists_to_dm_level(tmp_path):
 
 @pytest.mark.asyncio
 async def test_router_auto_detect_preserves_session_outside_telegram_dm(tmp_path):
-    """Outside a Telegram DM (e.g. group), /router off without flags stays session-only."""
+    """Outside conversation-scoped lanes (e.g. Telegram group root), /router off stays session-only."""
     session_db = SessionDB(db_path=tmp_path / "state.db")
     runner = _make_runner(session_db=session_db)
     event = MessageEvent(text="/router off", source=_make_group_source(), message_id="m1")
@@ -903,6 +903,50 @@ async def test_router_auto_detect_preserves_session_outside_telegram_dm(tmp_path
     assert "Updated router for this session only." in result
     session_key = runner._session_key_for_source(event.source)
     assert runner._session_router_overrides[session_key] is True
+
+
+@pytest.mark.asyncio
+async def test_router_auto_detect_persists_for_telegram_group_thread(tmp_path):
+    """In a Telegram group thread, /router off auto-persists to thread scope."""
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    runner = _make_runner(session_db=session_db)
+    thread_source = _make_group_source(thread_id="555")
+    thread_key = build_session_key(thread_source)
+
+    result = await runner._handle_router_command(
+        _make_group_event("/router off", thread_id="555")
+    )
+
+    assert "Saved router default for this thread." in result
+    assert "Scope: `thread`." in result
+    assert "/new in this conversation will keep using it." in result
+    assert runner._session_router_overrides[thread_key] is True
+
+    thread_override = session_db.get_telegram_group_thread_router_override(
+        chat_id="-100123",
+        thread_id="555",
+    )
+    assert thread_override is not None
+    assert thread_override["router_disabled"] == 1
+
+    await runner._handle_reset_command(_make_group_event("/new", thread_id="555"))
+
+    assert thread_key not in runner._session_router_overrides
+    thread_override = session_db.get_telegram_group_thread_router_override(
+        chat_id="-100123",
+        thread_id="555",
+    )
+    assert thread_override is not None
+    assert runner._resolve_session_router_disabled(
+        source=thread_source,
+        session_key=thread_key,
+    ) is True
+
+    status = await runner._handle_router_command(
+        _make_group_event("/router status", thread_id="555")
+    )
+    assert "🤖 Router: **disabled**" in status
+    assert "Scope: `thread`." in status
 
 
 @pytest.mark.asyncio

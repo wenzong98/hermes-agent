@@ -12530,8 +12530,8 @@ class GatewayRunner:
 
         Usage:
             /router                       Show current effective state
-            /router on                    Enable router for this session only
-            /router off                   Disable router for this session only
+            /router on                    Enable router (session-only, except Telegram DM/thread defaults)
+            /router off                   Disable router (session-only, except Telegram DM/thread defaults)
             /router reset                 Clear this session override
             /router on|off --topic        Persist router state for this Telegram DM/topic/thread
             /router --topic-reset         Clear the Telegram conversation default router state
@@ -12681,10 +12681,11 @@ class GatewayRunner:
                 + _router_usage_details(topic_hint=_supports_conversation_scope)
             )
 
-        # In a Telegram DM (root or topic lane), /router on|off without
-        # an explicit --global flag defaults to conversation-scoped
+        # In Telegram conversation lanes that support conversation scope
+        # (DM root/topic and group thread), /router on|off without an
+        # explicit --global flag defaults to conversation-scoped
         # persistence so the setting survives /new.
-        if _in_telegram_dm and not persist_global:
+        if _supports_conversation_scope and not persist_global:
             persist_topic = True
 
         if persist_topic:

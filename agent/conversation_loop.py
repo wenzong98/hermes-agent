@@ -327,15 +327,20 @@ def run_conversation(
 
                 # 提示：优先用 interim_assistant_callback（不依赖 streaming），
                 # fallback 到 stream_delta_callback（兼容旧行为）
+                _llm_arbiter_suffix = (
+                    " from LLM仲裁"
+                    if _effective_route.decision.primary_signal in ("llm_arbiter", "ARBITRATION")
+                    else ""
+                )
                 if _switched:
                     _switch_msg = (
                         f"🔀 Router判断：正在切换到 {_effective_route.model} "
-                        f"({_effective_route.provider or _old_provider_before_switch})"
+                        f"({_effective_route.provider or _old_provider_before_switch}){_llm_arbiter_suffix}"
                     )
                 else:
                     _switch_msg = (
                         f"🔀 Router判断：保持 {_old_model_before_switch} "
-                        f"({_old_provider_before_switch}) — 无需切换"
+                        f"({_old_provider_before_switch}) — 无需切换{_llm_arbiter_suffix}"
                     )
                 _callback_sent = False
                 if getattr(agent, "interim_assistant_callback", None):
