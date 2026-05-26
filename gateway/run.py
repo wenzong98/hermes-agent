@@ -12112,14 +12112,18 @@ class GatewayRunner:
         """Handle /router command — toggle task complexity router.
 
         Usage:
-            /router on   → enable router
-            /router off   → disable router
-            /router       → toggle
-            /router status → show current state
+            /router on        → enable router (topic-specific if in topic, else global)
+            /router off       → disable router (topic-specific if in topic, else global)
+            /router           → toggle (topic-specific if in topic, else global)
+            /router status    → show current state (topic-specific if in topic, else global)
+            /router global on → force global router on
+            /router global off → force global router off
+            /router global    → toggle global router
+            /router global status → show global state
         """
-        from hermes_cli.commands import _router_disabled
+        from hermes_cli.commands import _router_disabled, _topic_router_disabled
+        from gateway.platforms.base import Platform
 
-        # Parse arg
         arg = ""
         try:
             text = (getattr(event, "message", None) or "").strip()
@@ -12130,11 +12134,63 @@ class GatewayRunner:
         except Exception:
             arg = ""
 
-        current = _router_disabled()
+        source = getattr(event, "source", None)
+        is_telegram_topic = (
+            source is not None
+            and source.platform == Platform.TELEGRAM
+            and source.chat_type == "dm"
+            and source.thread_id
+            and str(source.thread_id) not in {"1", ""}
+        )
+
+        topic_key = None
+        if is_telegram_topic and source.chat_topic:
+            topic_key = f"{source.chat_id}:{source.chat_topic}"
+
+        if arg.startswith("global "):
+            global_arg = arg[7:].strip()
+            if global_arg in {"status", "?"}:
+                current = _router_disabled()
+                state = "disabled" if current else "enabled"
+                return f"🤖 Global Router: **{state}**\nTask complexity routing is {'disabled' if current else 'active'} globally."
+
+            if global_arg in {"on", "enable", "true", "1"}:
+                new_state = False
+            elif global_arg in {"off", "disable", "false", "0"}:
+                new_state = True
+            elif global_arg == "":
+                new_state = not _router_disabled()
+            else:
+                return "Usage: /router global [on|off|status]"
+
+            _router_disabled(new_state)
+            state = "disabled" if new_state else "enabled"
+            action = "Disabled" if new_state else "Enabled"
+            return f"🤖 Global Router: **{action}**\nTask complexity routing is now {state} globally."
+
+        if arg in {"global", "global status"}:
+            current = _router_disabled()
+            state = "disabled" if current else "enabled"
+            return f"🤖 Global Router: **{state}**\nTask complexity routing is {'disabled' if current else 'active'} globally."
+
+        if is_telegram_topic and topic_key:
+            current = _topic_router_disabled(topic_key)
+        else:
+            current = _router_disabled()
 
         if arg in {"status", "?"}:
-            state = "disabled" if current else "enabled"
-            return f"🤖 Router: **{state}**\nTask complexity routing is {'disabled' if current else 'active'}."
+            if is_telegram_topic and topic_key:
+                global_state = _router_disabled()
+                state = "disabled" if current else "enabled"
+                global_state_str = "disabled" if global_state else "enabled"
+                return (
+                    f"🤖 Router (Topic '{source.chat_topic}'): **{state}**\n"
+                    f"Task complexity routing is {'disabled' if current else 'active'} for this topic.\n"
+                    f"Global default: {global_state_str}."
+                )
+            else:
+                state = "disabled" if current else "enabled"
+                return f"🤖 Router: **{state}**\nTask complexity routing is {'disabled' if current else 'active'}."
 
         if arg in {"on", "enable", "true", "1"}:
             new_state = False
@@ -12143,12 +12199,23 @@ class GatewayRunner:
         elif arg == "":
             new_state = not current
         else:
+            if is_telegram_topic and topic_key:
+                return "Usage: /router [on|off|status]\nFor global control: /router global [on|off|status]"
             return "Usage: /router [on|off|status]"
 
-        _router_disabled(new_state)
-        state = "disabled" if new_state else "enabled"
-        action = "Disabled" if new_state else "Enabled"
-        return f"🤖 Router: **{action}**\nTask complexity routing is now {state}."
+        if is_telegram_topic and topic_key:
+            _topic_router_disabled(topic_key, new_state)
+            state = "disabled" if new_state else "enabled"
+            action = "Disabled" if new_state else "Enabled"
+            return (
+                f"🤖 Router (Topic '{source.chat_topic}'): **{action}**\n"
+                f"Task complexity routing is now {state} for this topic."
+            )
+        else:
+            _router_disabled(new_state)
+            state = "disabled" if new_state else "enabled"
+            action = "Disabled" if new_state else "Enabled"
+            return f"🤖 Router: **{action}**\nTask complexity routing is now {state}."
 
     async def _handle_compress_command(self, event: MessageEvent) -> str:
         """Handle /compress command -- manually compress conversation context.
@@ -16635,10 +16702,22 @@ class GatewayRunner:
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
-            # Apply global task complexity router toggle (set via /router command)
+            # Apply task complexity router toggle (topic-specific if in a topic, else global)
             try:
-                from hermes_cli.commands import _router_disabled
-                agent._task_complexity_router_disabled = _router_disabled()
+                from hermes_cli.commands import _router_disabled, _topic_router_disabled
+                topic_key = None
+                if (
+                    source.platform == Platform.TELEGRAM
+                    and source.chat_type == "dm"
+                    and source.thread_id
+                    and str(source.thread_id) not in {"1", ""}
+                    and source.chat_topic
+                ):
+                    topic_key = f"{source.chat_id}:{source.chat_topic}"
+                if topic_key:
+                    agent._task_complexity_router_disabled = _topic_router_disabled(topic_key)
+                else:
+                    agent._task_complexity_router_disabled = _router_disabled()
             except Exception:
                 pass
 

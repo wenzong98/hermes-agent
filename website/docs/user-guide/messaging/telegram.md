@@ -662,6 +662,23 @@ For example, a topic with `skill: arxiv` will have the arxiv skill pre-loaded wh
 Topics created outside of the config (e.g., by manually calling the Telegram API) are discovered automatically when a `forum_topic_created` service message arrives. You can also add topics to the config while the gateway is running — they'll be picked up on the next cache miss.
 :::
 
+### Per-topic router control
+
+Each topic can have its own router setting that overrides the global default. Use the `/router` command directly within a topic:
+
+| Command | Effect |
+|---------|--------|
+| `/router off` | Disable router for this topic only |
+| `/router on` | Enable router for this topic only |
+| `/router` | Toggle router for this topic |
+| `/router status` | Show router state for this topic and global default |
+| `/router global off` | Disable router globally (all topics) |
+| `/router global on` | Enable router globally |
+| `/router global` | Toggle global router |
+| `/router global status` | Show global router state |
+
+When a topic has no explicit router setting, it inherits the global state. Topic-specific settings persist across sessions and restarts.
+
 ## Multi-session DM mode (`/topic`)
 
 A ChatGPT-style multi-session DM — one bot, many parallel conversations. Unlike the operator-curated `extra.dm_topics` above, this mode is **user-driven**: no config, no pre-declared topic names. The end user flips it on with `/topic`, then taps the Telegram **+** button to create as many topics as they want, each one a fully independent Hermes session.

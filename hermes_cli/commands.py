@@ -1823,15 +1823,17 @@ def _file_size_label(path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Task Complexity Router global toggle (persistent)
+# Task Complexity Router global and per-topic toggle (persistent)
 # ---------------------------------------------------------------------------
 
 import threading
+from typing import Optional
 
 from hermes_constants import get_hermes_home
 
 _router_disabled_lock = threading.Lock()
 _router_disabled_cache: bool | None = None  # None = not yet loaded
+_topic_router_cache: dict[str, bool] = {}
 
 
 def _router_disabled(value: bool | None = None) -> bool:
@@ -1842,13 +1844,11 @@ def _router_disabled(value: bool | None = None) -> bool:
     """
     global _router_disabled_cache
 
-    # ── Read path (no lock needed for cached read) ──────────────────────────
     if value is None and _router_disabled_cache is not None:
         return _router_disabled_cache
 
     with _router_disabled_lock:
         if value is None:
-            # Re-read from config
             import yaml
             cfg_path = get_hermes_home() / "config.yaml"
             try:
@@ -1862,11 +1862,8 @@ def _router_disabled(value: bool | None = None) -> bool:
             _router_disabled_cache = cfg.get("task_complexity_router_disabled", False)
             return _router_disabled_cache
 
-        # ── Write path ──────────────────────────────────────────────────────
         import yaml
-
         _router_disabled_cache = bool(value)
-
         cfg_path = get_hermes_home() / "config.yaml"
         try:
             if cfg_path.exists():
@@ -1879,7 +1876,6 @@ def _router_disabled(value: bool | None = None) -> bool:
 
         cfg["task_complexity_router_disabled"] = bool(value)
 
-        # Atomic write via atomic_yaml_write if available, else fallback
         try:
             from hermes_cli.config import atomic_yaml_write
             atomic_yaml_write(cfg_path, cfg)
@@ -1888,3 +1884,74 @@ def _router_disabled(value: bool | None = None) -> bool:
                 yaml.safe_dump(cfg, f, default_flow_style=False)
 
         return _router_disabled_cache
+
+
+def _topic_router_disabled(topic_key: Optional[str] = None, value: Optional[bool] = None) -> bool:
+    """Get or set the router disabled flag for a specific topic.
+
+    Args:
+        topic_key: The topic key in format "chat_id:topic_name". If None, returns global state.
+        value: When None (default): returns current state. When True/False: sets new state.
+
+    Returns:
+        The router disabled state for the topic (or global state if topic_key is None).
+    """
+    global _topic_router_cache
+
+    if topic_key is None:
+        return _router_disabled()
+
+    if value is None and topic_key in _topic_router_cache:
+        return _topic_router_cache[topic_key]
+
+    with _router_disabled_lock:
+        if value is None:
+            import yaml
+            cfg_path = get_hermes_home() / "config.yaml"
+            try:
+                if cfg_path.exists():
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cfg = yaml.safe_load(f) or {}
+                else:
+                    cfg = {}
+            except Exception:
+                cfg = {}
+
+            topic_settings = cfg.get("telegram_topic_router_settings", {})
+            topic_state = topic_settings.get(topic_key, {}).get("router_disabled")
+
+            if topic_state is not None:
+                _topic_router_cache[topic_key] = bool(topic_state)
+                return bool(topic_state)
+
+            return _router_disabled()
+
+        _topic_router_cache[topic_key] = bool(value)
+
+        import yaml
+        cfg_path = get_hermes_home() / "config.yaml"
+        try:
+            if cfg_path.exists():
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+            else:
+                cfg = {}
+        except Exception:
+            cfg = {}
+
+        if "telegram_topic_router_settings" not in cfg:
+            cfg["telegram_topic_router_settings"] = {}
+
+        if topic_key not in cfg["telegram_topic_router_settings"]:
+            cfg["telegram_topic_router_settings"][topic_key] = {}
+
+        cfg["telegram_topic_router_settings"][topic_key]["router_disabled"] = bool(value)
+
+        try:
+            from hermes_cli.config import atomic_yaml_write
+            atomic_yaml_write(cfg_path, cfg)
+        except Exception:
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(cfg, f, default_flow_style=False)
+
+        return bool(value)
