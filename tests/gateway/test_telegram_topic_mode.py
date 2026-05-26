@@ -600,6 +600,183 @@ async def test_model_topic_reset_is_idempotent_when_no_saved_default(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_router_topic_persists_across_new(tmp_path):
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    session_db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    runner = _make_runner(session_db=session_db)
+    topic_source = _make_source(thread_id="17585")
+    topic_key = build_session_key(topic_source)
+
+    result = await runner._handle_router_command(
+        _make_event("/router off --topic", thread_id="17585")
+    )
+
+    assert "Saved router default for Telegram topic." in result
+    assert "Scope: `topic`." in result
+    assert runner._session_router_overrides[topic_key] is True
+    topic_override = session_db.get_telegram_topic_router_override(
+        chat_id="208214988",
+        thread_id="17585",
+    )
+    assert topic_override is not None
+    assert topic_override["router_disabled"] == 1
+
+    await runner._handle_reset_command(_make_event("/new", thread_id="17585"))
+
+    assert topic_key not in runner._session_router_overrides
+    topic_override = session_db.get_telegram_topic_router_override(
+        chat_id="208214988",
+        thread_id="17585",
+    )
+    assert topic_override is not None
+    assert runner._resolve_session_router_disabled(
+        source=topic_source,
+        session_key=topic_key,
+    ) is True
+
+    status = await runner._handle_router_command(
+        _make_event("/router status", thread_id="17585")
+    )
+    assert "🤖 Router: **disabled**" in status
+    assert "Scope: `topic`." in status
+
+
+@pytest.mark.asyncio
+async def test_router_topic_reset_clears_persisted_and_session_override(tmp_path):
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    session_db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    runner = _make_runner(session_db=session_db)
+    topic_key = build_session_key(_make_source(thread_id="17585"))
+    runner._session_router_overrides[topic_key] = True
+    session_db.set_telegram_topic_router_override(
+        chat_id="208214988",
+        thread_id="17585",
+        user_id="208214988",
+        router_disabled=True,
+    )
+
+    result = await runner._handle_router_command(
+        _make_event("/router --topic-reset", thread_id="17585")
+    )
+
+    assert "Cleared the default router state for Telegram topic" in result
+    assert topic_key not in runner._session_router_overrides
+    assert session_db.get_telegram_topic_router_override(
+        chat_id="208214988",
+        thread_id="17585",
+    ) is None
+    status = await runner._handle_router_command(
+        _make_event("/router status", thread_id="17585")
+    )
+    assert "Scope: `global`." in status
+
+
+@pytest.mark.asyncio
+async def test_router_topic_auto_detect_in_topic_lane(tmp_path):
+    """In a Telegram topic lane, /router off without --topic auto-persists to topic."""
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    session_db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    runner = _make_runner(session_db=session_db)
+    topic_source = _make_source(thread_id="17585")
+    topic_key = build_session_key(topic_source)
+
+    result = await runner._handle_router_command(
+        _make_event("/router off", thread_id="17585")
+    )
+
+    assert "Saved router default for Telegram topic." in result
+    assert "Scope: `topic`." in result
+    assert "/new in this conversation will keep using it." in result
+
+    topic_override = session_db.get_telegram_topic_router_override(
+        chat_id="208214988",
+        thread_id="17585",
+    )
+    assert topic_override is not None
+    assert topic_override["router_disabled"] == 1
+
+    await runner._handle_reset_command(_make_event("/new", thread_id="17585"))
+
+    assert topic_key not in runner._session_router_overrides
+    topic_override = session_db.get_telegram_topic_router_override(
+        chat_id="208214988",
+        thread_id="17585",
+    )
+    assert topic_override is not None
+    assert runner._resolve_session_router_disabled(
+        source=topic_source,
+        session_key=topic_key,
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_router_dm_root_auto_detect_persists_to_dm_level(tmp_path):
+    """In a root Telegram DM (no topic), /router off auto-persists to DM level.
+
+    Setting survives /new and /router --topic-reset clears it.
+    """
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    runner = _make_runner(session_db=session_db)
+    dm_source = _make_source()
+    dm_key = build_session_key(dm_source)
+    assert dm_source.thread_id is None
+
+    result = await runner._handle_router_command(
+        _make_event("/router off")
+    )
+
+    assert "Saved router default for this DM chat." in result
+    assert "Scope: `dm`." in result
+    assert "/new in this conversation will keep using it." in result
+    assert runner._session_router_overrides[dm_key] is True
+    dm_override = session_db.get_telegram_topic_router_override(
+        chat_id="208214988",
+        thread_id="",
+    )
+    assert dm_override is not None
+    assert dm_override["router_disabled"] == 1
+
+    await runner._handle_reset_command(_make_event("/new"))
+
+    assert dm_key not in runner._session_router_overrides
+    dm_override = session_db.get_telegram_topic_router_override(
+        chat_id="208214988",
+        thread_id="",
+    )
+    assert dm_override is not None
+    assert runner._resolve_session_router_disabled(
+        source=dm_source,
+        session_key=dm_key,
+    ) is True
+
+    status = await runner._handle_router_command(_make_event("/router status"))
+    assert "Scope: `dm`." in status
+
+    reset_result = await runner._handle_router_command(
+        _make_event("/router --topic-reset")
+    )
+    assert "Cleared the default router state for this DM chat" in reset_result
+    assert session_db.get_telegram_topic_router_override(
+        chat_id="208214988",
+        thread_id="",
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_router_auto_detect_preserves_session_outside_telegram_dm(tmp_path):
+    """Outside a Telegram DM (e.g. group), /router off without flags stays session-only."""
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    runner = _make_runner(session_db=session_db)
+    event = MessageEvent(text="/router off", source=_make_group_source(), message_id="m1")
+
+    result = await runner._handle_router_command(event)
+
+    assert "Updated router for this session only." in result
+    session_key = runner._session_key_for_source(event.source)
+    assert runner._session_router_overrides[session_key] is True
+
+
+@pytest.mark.asyncio
 async def test_topic_root_command_explicitly_migrates_and_enables_topic_mode(tmp_path, monkeypatch):
     import gateway.run as gateway_run
 
@@ -617,7 +794,7 @@ async def test_topic_root_command_explicitly_migrates_and_enables_topic_mode(tmp
 
     assert "Telegram multi-session topics are enabled" in result
     assert "All Messages" in result
-    assert session_db.get_meta("telegram_dm_topic_schema_version") == "2"
+    assert session_db.get_meta("telegram_dm_topic_schema_version") == "3"
     assert session_db.is_telegram_topic_mode_enabled(chat_id="208214988", user_id="208214988")
     assert runner._telegram_topic_mode_enabled(_make_source()) is True
     runner._run_agent.assert_not_called()
@@ -1175,7 +1352,7 @@ def test_migration_rebuilds_v1_binding_table_with_cascade_fk(tmp_path):
     ).fetchall()
     assert any(row[2] == "sessions" and (row[6] or "") != "CASCADE" for row in fk_rows)
 
-    # Re-run migration — should upgrade to v2 shape.
+    # Re-run migration — should upgrade the bindings table and bump schema metadata.
     db.apply_telegram_topic_migration()
 
     fk_rows_after = db._conn.execute(
@@ -1186,7 +1363,7 @@ def test_migration_rebuilds_v1_binding_table_with_cascade_fk(tmp_path):
     version = db._conn.execute(
         "SELECT value FROM state_meta WHERE key = 'telegram_dm_topic_schema_version'"
     ).fetchone()
-    assert version is not None and version[0] == "2"
+    assert version is not None and version[0] == "3"
 
 
 @pytest.mark.asyncio

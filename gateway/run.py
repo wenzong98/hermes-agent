@@ -3012,26 +3012,37 @@ class GatewayRunner:
         return " ".join(value_tokens).strip().lower(), persist_global
 
     @staticmethod
-    def _parse_router_command_args(raw_args: str) -> tuple[str, bool]:
-        """Parse `/router` args into `(value, persist_global)`."""
+    def _parse_router_command_args(raw_args: str) -> tuple[str, bool, bool, bool]:
+        """Parse `/router` args into `(value, persist_global, persist_topic, clear_topic_default)`."""
         import shlex
 
         text = str(raw_args or "").strip().replace("—", "--")
         if not text:
-            return "", False
+            return "", False, False, False
         try:
             tokens = shlex.split(text)
         except ValueError:
             tokens = text.split()
 
         persist_global = False
+        persist_topic = False
+        clear_topic_default = False
         value_tokens = []
         for token in tokens:
             if token == "--global":
                 persist_global = True
+            elif token == "--topic":
+                persist_topic = True
+            elif token == "--topic-reset":
+                clear_topic_default = True
             else:
                 value_tokens.append(token)
-        return " ".join(value_tokens).strip().lower(), persist_global
+        return (
+            " ".join(value_tokens).strip().lower(),
+            persist_global,
+            persist_topic,
+            clear_topic_default,
+        )
 
     def _resolve_session_reasoning_config(
         self,
@@ -3086,6 +3097,9 @@ class GatewayRunner:
         overrides = getattr(self, "_session_router_overrides", {}) or {}
         if resolved_session_key and resolved_session_key in overrides:
             return bool(overrides[resolved_session_key])
+        topic_override = self._get_telegram_topic_router_override(source)
+        if topic_override is not None:
+            return bool(topic_override.get("router_disabled"))
         return bool(_router_disabled())
 
     def _set_session_router_override(
@@ -3102,6 +3116,80 @@ class GatewayRunner:
             self._session_router_overrides.pop(session_key, None)
         else:
             self._session_router_overrides[session_key] = bool(router_disabled)
+
+    def _get_telegram_topic_router_override(
+        self,
+        source: Optional[SessionSource],
+    ) -> Optional[Dict[str, Any]]:
+        """Return the persisted router override for a Telegram DM or topic lane.
+
+        For topic lanes the key is (chat_id, thread_id); for the root DM
+        the key is (chat_id, "").  Returns None when no override is stored.
+        """
+        session_db = getattr(self, "_session_db", None)
+        if (
+            source is None
+            or session_db is None
+            or source.platform != Platform.TELEGRAM
+            or source.chat_type != "dm"
+            or not source.chat_id
+        ):
+            return None
+        try:
+            thread_id = str(source.thread_id) if self._is_telegram_topic_lane(source) else ""
+            return session_db.get_telegram_topic_router_override(
+                chat_id=str(source.chat_id),
+                thread_id=thread_id,
+            )
+        except Exception:
+            logger.debug("Failed to read Telegram topic router override", exc_info=True)
+            return None
+
+    def _persist_telegram_topic_router_override(
+        self,
+        source: SessionSource,
+        *,
+        router_disabled: bool,
+    ) -> Optional[str]:
+        """Persist the router state for the current Telegram DM or topic lane."""
+        if source.platform != Platform.TELEGRAM or source.chat_type != "dm":
+            return "Conversation-scoped router defaults are only available inside a Telegram DM."
+        session_db = getattr(self, "_session_db", None)
+        if session_db is None:
+            return "Telegram topic router defaults are unavailable because SessionDB is not initialized."
+        try:
+            thread_id = str(source.thread_id) if self._is_telegram_topic_lane(source) else ""
+            session_db.set_telegram_topic_router_override(
+                chat_id=str(source.chat_id),
+                thread_id=thread_id,
+                user_id=str(source.user_id or ""),
+                router_disabled=router_disabled,
+            )
+        except Exception as exc:
+            logger.exception("Failed to persist Telegram topic router override")
+            return f"Failed to save topic router default: {exc}"
+        return None
+
+    def _clear_telegram_topic_router_override(
+        self,
+        source: SessionSource,
+    ) -> tuple[bool, Optional[str]]:
+        """Clear the persisted router state for the current Telegram DM or topic lane."""
+        if source.platform != Platform.TELEGRAM or source.chat_type != "dm":
+            return False, "Conversation-scoped router defaults are only available inside a Telegram DM."
+        session_db = getattr(self, "_session_db", None)
+        if session_db is None:
+            return False, "Telegram topic router defaults are unavailable because SessionDB is not initialized."
+        try:
+            thread_id = str(source.thread_id) if self._is_telegram_topic_lane(source) else ""
+            removed = session_db.clear_telegram_topic_router_override(
+                chat_id=str(source.chat_id),
+                thread_id=thread_id,
+            )
+            return removed, None
+        except Exception as exc:
+            logger.exception("Failed to clear Telegram topic router override")
+            return False, f"Failed to clear topic router default: {exc}"
 
     @staticmethod
     def _load_service_tier() -> str | None:
@@ -12369,32 +12457,51 @@ class GatewayRunner:
             /router on                    Enable router for this session only
             /router off                   Disable router for this session only
             /router reset                 Clear this session override
+            /router on|off --topic        Persist router state for this Telegram topic
+            /router --topic-reset         Clear the Telegram topic default router state
             /router on|off --global       Persist router state to config.yaml
             /router status                Show current effective state
         """
         from hermes_cli.commands import _router_disabled
 
-        def _router_usage_details() -> str:
-            return "\n".join(
+        def _router_usage_details(topic_hint: bool = False) -> str:
+            lines = [
+                "Available `/router` actions:",
+                "- `/router` or `/router status`: show whether task complexity routing is currently active, and whether the value comes from this session, DM/topic, or global default.",
+            ]
+            if topic_hint:
+                lines.append(
+                    "- `/router on` / `off`: set the router default for **this conversation** "
+                    "(DM or topic) so it survives `/new`.  Use `--global` if you want to "
+                    "change the global default instead."
+                )
+            else:
+                lines.append(
+                    "- `/router on` / `off`: enable or disable routing **for this session only**."
+                )
+            lines.extend(
                 [
-                    "Available `/router` actions:",
-                    "- `/router` or `/router status`: show whether task complexity routing is currently active, and whether the value comes from this session or the global default.",
-                    "- `/router on`: enable routing for this session only, so Hermes can automatically choose the simple or complex route on the next message.",
-                    "- `/router off`: disable routing for this session only, so Hermes stays on the current default model path instead of auto-switching by task complexity.",
-                    "- `/router reset`: clear this session override and fall back to the global default router setting.",
+                    "- `/router reset`: clear this session override and fall back to the DM/topic or global default.",
+                    "- `/router --topic-reset`: clear the saved router default for this DM or Telegram topic and fall back to the global default.",
                     "- `/router on --global`: save router enabled as the default in `config.yaml` for future sessions.",
                     "- `/router off --global`: save router disabled as the default in `config.yaml` for future sessions.",
                 ]
             )
+            return "\n".join(lines)
 
-        def _router_state_summary(*, router_disabled: bool, scope: str, using_global_default: bool = False) -> str:
+        def _router_state_summary(
+            *,
+            router_disabled: bool,
+            scope: str,
+            fallback_note: Optional[str] = None,
+        ) -> str:
             if router_disabled:
                 behavior = "Hermes will stay on the default model path and will not auto-switch models by task complexity."
             else:
                 behavior = "Hermes will automatically choose the simple or complex route on the next message."
             scope_line = f"Scope: `{scope}`."
-            if using_global_default:
-                scope_line += " This session is now following the global default again."
+            if fallback_note:
+                scope_line += f" {fallback_note}"
             return "\n".join(
                 [
                     f"🤖 Router: **{'disabled' if router_disabled else 'enabled'}**",
@@ -12404,35 +12511,74 @@ class GatewayRunner:
             )
 
         raw_args = event.get_command_args().strip()
-        arg, persist_global = self._parse_router_command_args(raw_args)
+        arg, persist_global, persist_topic, clear_topic_default = self._parse_router_command_args(raw_args)
+        if sum(bool(x) for x in (persist_global, persist_topic, clear_topic_default)) > 1:
+            return "Use only one of --global, --topic, or --topic-reset."
+
+        _in_topic = self._is_telegram_topic_lane(event.source)
+        _in_telegram_dm = event.source.platform == Platform.TELEGRAM and event.source.chat_type == "dm"
+        _conversation_label = "Telegram topic" if _in_topic else "this DM chat"
+
         session_key = self._session_key_for_source(event.source)
+        if (persist_topic or clear_topic_default) and not _in_telegram_dm:
+            return "Conversation-scoped router defaults are only available inside a Telegram DM."
         current = self._resolve_session_router_disabled(
             source=event.source,
             session_key=session_key,
         )
         has_session_override = session_key in (getattr(self, "_session_router_overrides", {}) or {})
+        topic_override = None if has_session_override else self._get_telegram_topic_router_override(event.source)
+
+        if clear_topic_default:
+            removed, clear_error = self._clear_telegram_topic_router_override(event.source)
+            if clear_error:
+                return clear_error
+            self._set_session_router_override(session_key, None)
+            self._evict_cached_agent(session_key)
+            if removed:
+                return (
+                    f"Cleared the default router state for {_conversation_label}. "
+                    "The next message here will use the global router default."
+                )
+            return (
+                f"{_conversation_label} does not have a saved router default. "
+                "The next message here will use the global router default."
+            )
 
         if not raw_args or arg in {"status", "?"}:
+            conv_scope = "topic" if _in_topic else ("dm" if _in_telegram_dm else "global")
             return _router_state_summary(
                 router_disabled=current,
-                scope="session" if has_session_override else "global",
+                scope="session" if has_session_override else conv_scope if topic_override else "global",
             )
 
         if arg == "reset":
-            if persist_global:
+            if persist_global or persist_topic or clear_topic_default:
                 return (
-                    "`/router reset` only works at the session scope and cannot be combined with `--global`.\n"
-                    + _router_usage_details()
+                    "`/router reset` only works at the session scope and cannot be combined with `--global`, `--topic`, or `--topic-reset`.\n"
+                    + _router_usage_details(topic_hint=_in_telegram_dm)
                 )
             self._set_session_router_override(session_key, None)
             self._evict_cached_agent(session_key)
-            current = _router_disabled()
+            topic_override = self._get_telegram_topic_router_override(event.source)
+            current = (
+                bool(topic_override.get("router_disabled"))
+                if topic_override is not None
+                else _router_disabled()
+            )
+            reset_scope = "topic" if _in_topic else ("dm" if _in_telegram_dm else "global")
+            reset_scope = reset_scope if topic_override is not None else "global"
+            reset_note = (
+                f"This session is now following the {_conversation_label} default again."
+                if topic_override is not None
+                else "This session is now following the global default again."
+            )
             return (
                 "🤖 Router override cleared\n"
                 + _router_state_summary(
                     router_disabled=current,
-                    scope="global",
-                    using_global_default=True,
+                    scope=reset_scope,
+                    fallback_note=reset_note,
                 )
             )
 
@@ -12443,7 +12589,31 @@ class GatewayRunner:
         else:
             return (
                 "Unknown `/router` option.\n"
-                + _router_usage_details()
+                + _router_usage_details(topic_hint=_in_telegram_dm)
+            )
+
+        # In a Telegram DM (root or topic lane), /router on|off without
+        # an explicit --global flag defaults to conversation-scoped
+        # persistence so the setting survives /new.
+        if _in_telegram_dm and not persist_global:
+            persist_topic = True
+
+        if persist_topic:
+            topic_error = self._persist_telegram_topic_router_override(
+                event.source,
+                router_disabled=new_state,
+            )
+            if topic_error:
+                return topic_error
+            self._set_session_router_override(session_key, new_state)
+            self._evict_cached_agent(session_key)
+            return (
+                f"Saved router default for {_conversation_label}.\n"
+                + _router_state_summary(
+                    router_disabled=new_state,
+                    scope="topic" if _in_topic else "dm",
+                )
+                + "\n/new in this conversation will keep using it."
             )
 
         if persist_global:

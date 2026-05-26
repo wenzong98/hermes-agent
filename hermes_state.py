@@ -2710,6 +2710,15 @@ class SessionDB:
                     updated_at REAL NOT NULL,
                     PRIMARY KEY (chat_id, thread_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS telegram_dm_topic_router_overrides (
+                    chat_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    router_disabled INTEGER NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (chat_id, thread_id)
+                );
                 """
             )
 
@@ -2760,7 +2769,7 @@ class SessionDB:
             conn.execute(
                 "INSERT INTO state_meta (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                ("telegram_dm_topic_schema_version", "2"),
+                ("telegram_dm_topic_schema_version", "3"),
             )
         self._execute_write(_do)
 
@@ -2843,6 +2852,10 @@ class SessionDB:
                     )
                     conn.execute(
                         "DELETE FROM telegram_dm_topic_model_overrides WHERE chat_id = ?",
+                        (str(chat_id),),
+                    )
+                    conn.execute(
+                        "DELETE FROM telegram_dm_topic_router_overrides WHERE chat_id = ?",
                         (str(chat_id),),
                     )
             except sqlite3.OperationalError:
@@ -3082,6 +3095,87 @@ class SessionDB:
             cursor = conn.execute(
                 """
                 DELETE FROM telegram_dm_topic_model_overrides
+                WHERE chat_id = ? AND thread_id = ?
+                """,
+                (str(chat_id), str(thread_id)),
+            )
+            removed = cursor.rowcount > 0
+
+        self._execute_write(_do)
+        return removed
+
+    def get_telegram_topic_router_override(
+        self,
+        *,
+        chat_id: str,
+        thread_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the persisted router override for one Telegram DM topic."""
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    """
+                    SELECT * FROM telegram_dm_topic_router_overrides
+                    WHERE chat_id = ? AND thread_id = ?
+                    """,
+                    (str(chat_id), str(thread_id)),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
+        return dict(row) if row else None
+
+    def set_telegram_topic_router_override(
+        self,
+        *,
+        chat_id: str,
+        thread_id: str,
+        user_id: str,
+        router_disabled: bool,
+    ) -> None:
+        """Persist the router state for one Telegram DM topic."""
+        self.apply_telegram_topic_migration()
+        now = time.time()
+        chat_id = str(chat_id)
+        thread_id = str(thread_id)
+        user_id = str(user_id)
+
+        def _do(conn):
+            conn.execute(
+                """
+                INSERT INTO telegram_dm_topic_router_overrides (
+                    chat_id, thread_id, user_id, router_disabled, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, thread_id) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    router_disabled = excluded.router_disabled,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    chat_id,
+                    thread_id,
+                    user_id,
+                    1 if router_disabled else 0,
+                    now,
+                ),
+            )
+
+        self._execute_write(_do)
+
+    def clear_telegram_topic_router_override(
+        self,
+        *,
+        chat_id: str,
+        thread_id: str,
+    ) -> bool:
+        """Delete the persisted router override for one Telegram DM topic."""
+        self.apply_telegram_topic_migration()
+        removed = False
+
+        def _do(conn):
+            nonlocal removed
+            cursor = conn.execute(
+                """
+                DELETE FROM telegram_dm_topic_router_overrides
                 WHERE chat_id = ? AND thread_id = ?
                 """,
                 (str(chat_id), str(thread_id)),

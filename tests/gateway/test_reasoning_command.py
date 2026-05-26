@@ -15,13 +15,18 @@ from gateway.platforms.base import MessageEvent
 from gateway.session import SessionSource
 
 
-def _make_event(text="/reasoning", platform=Platform.TELEGRAM, user_id="12345", chat_id="67890"):
-    """Build a MessageEvent for testing."""
+def _make_event(text="/reasoning", platform=Platform.TELEGRAM, user_id="12345", chat_id="67890", chat_type=""):
+    """Build a MessageEvent for testing.
+
+    Defaults to chat_type="" so the auto-detect for Telegram DM router
+    persistence does not engage unless a test explicitly opts in.
+    """
     source = SessionSource(
         platform=platform,
         user_id=user_id,
         chat_id=chat_id,
         user_name="testuser",
+        chat_type=chat_type,
     )
     return MessageEvent(text=text, source=source)
 
@@ -473,8 +478,7 @@ class TestRouterCommand:
         assert "/router off" in result
         assert "/router reset" in result
         assert "/router on --global" in result
-        assert "simple or complex route" in result
-        assert "current default model path" in result
+        assert "this session only" in result
 
     @pytest.mark.asyncio
     async def test_router_reset_global_combination_explains_scope_limit(self):
