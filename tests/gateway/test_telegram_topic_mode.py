@@ -449,6 +449,157 @@ async def test_new_inside_telegram_topic_rewrites_binding_to_new_session(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_model_topic_persists_default_across_new(tmp_path, monkeypatch):
+    import gateway.run as gateway_run
+    import hermes_cli.runtime_provider as runtime_provider
+    from hermes_cli.model_switch import ModelSwitchResult
+
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    session_db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    runner = _make_runner(session_db=session_db)
+    topic_source = _make_source(thread_id="17585")
+    topic_key = build_session_key(topic_source)
+
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {"model": {"default": "global-model", "provider": "openrouter"}},
+    )
+
+    def fake_switch_model(**_kwargs):
+        return ModelSwitchResult(
+            success=True,
+            new_model="gpt-topic",
+            target_provider="openai-codex",
+            api_key="topic-key",
+            base_url="https://chatgpt.com/backend-api/codex",
+            api_mode="codex_responses",
+            provider_label="OpenAI Codex",
+        )
+
+    monkeypatch.setattr("hermes_cli.model_switch.switch_model", fake_switch_model)
+
+    result = await runner._handle_model_command(
+        _make_event("/model gpt-topic --topic", thread_id="17585")
+    )
+
+    assert "Saved as the default model for this Telegram topic" in result
+    assert runner._session_model_overrides[topic_key]["model"] == "gpt-topic"
+    topic_override = session_db.get_telegram_topic_model_override(
+        chat_id="208214988",
+        thread_id="17585",
+    )
+    assert topic_override is not None
+    assert topic_override["model"] == "gpt-topic"
+    assert topic_override["provider"] == "openai-codex"
+
+    await runner._handle_reset_command(_make_event("/new", thread_id="17585"))
+
+    assert topic_key not in runner._session_model_overrides
+    topic_override = session_db.get_telegram_topic_model_override(
+        chat_id="208214988",
+        thread_id="17585",
+    )
+    assert topic_override is not None
+    assert topic_override["model"] == "gpt-topic"
+
+    def fake_resolve_runtime_provider(
+        *,
+        requested=None,
+        explicit_base_url=None,
+        explicit_api_key=None,
+        target_model=None,
+    ):
+        assert requested == "openai-codex"
+        assert explicit_base_url == "https://chatgpt.com/backend-api/codex"
+        assert explicit_api_key is None
+        assert target_model == "gpt-topic"
+        return {
+            "api_key": "re-resolved-key",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+        }
+
+    monkeypatch.setattr(runtime_provider, "resolve_runtime_provider", fake_resolve_runtime_provider)
+
+    model, runtime_kwargs = runner._resolve_session_agent_runtime(
+        source=topic_source,
+        session_key=topic_key,
+        user_config={"model": {"default": "global-model", "provider": "openrouter"}},
+    )
+
+    assert model == "gpt-topic"
+    assert runtime_kwargs["provider"] == "openai-codex"
+    assert runtime_kwargs["api_key"] == "re-resolved-key"
+
+
+@pytest.mark.asyncio
+async def test_model_topic_requires_telegram_topic_lane(tmp_path):
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    session_db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    runner = _make_runner(session_db=session_db)
+
+    result = await runner._handle_model_command(_make_event("/model gpt-topic --topic"))
+
+    assert result == "Topic-scoped model defaults are only available inside a Telegram topic."
+
+
+@pytest.mark.asyncio
+async def test_model_topic_reset_clears_persisted_and_session_override(tmp_path):
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    session_db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    runner = _make_runner(session_db=session_db)
+    topic_source = _make_source(thread_id="17585")
+    topic_key = build_session_key(topic_source)
+    runner._session_model_overrides[topic_key] = {
+        "model": "gpt-topic",
+        "provider": "openai-codex",
+        "api_key": "topic-key",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_mode": "codex_responses",
+    }
+    runner._pending_model_notes[topic_key] = "[Note: switched to gpt-topic.]"
+    session_db.set_telegram_topic_model_override(
+        chat_id="208214988",
+        thread_id="17585",
+        user_id="208214988",
+        model="gpt-topic",
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_mode="codex_responses",
+    )
+
+    result = await runner._handle_model_command(
+        _make_event("/model --topic-reset", thread_id="17585")
+    )
+
+    assert "Cleared the default model for this Telegram topic" in result
+    assert topic_key not in runner._session_model_overrides
+    assert topic_key not in runner._pending_model_notes
+    assert session_db.get_telegram_topic_model_override(
+        chat_id="208214988",
+        thread_id="17585",
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_model_topic_reset_is_idempotent_when_no_saved_default(tmp_path):
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    session_db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    runner = _make_runner(session_db=session_db)
+
+    result = await runner._handle_model_command(
+        _make_event("/model --topic-reset", thread_id="17585")
+    )
+
+    assert "does not have a saved default model" in result
+
+
+@pytest.mark.asyncio
 async def test_topic_root_command_explicitly_migrates_and_enables_topic_mode(tmp_path, monkeypatch):
     import gateway.run as gateway_run
 

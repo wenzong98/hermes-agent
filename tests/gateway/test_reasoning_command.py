@@ -437,6 +437,7 @@ class TestLoadShowReasoningCoercion:
             'display:\n  show_reasoning: "true"\n',
         ) is True
 
+
     def test_bare_true_is_true(self, tmp_path, monkeypatch):
         assert self._load_with_config(
             tmp_path, monkeypatch,
@@ -448,3 +449,85 @@ class TestLoadShowReasoningCoercion:
             tmp_path, monkeypatch,
             'display: {}\n',
         ) is False
+
+
+class TestRouterCommand:
+    @pytest.mark.asyncio
+    async def test_router_in_help_output(self):
+        runner = _make_runner()
+        event = _make_event(text="/help")
+
+        result = await runner._handle_help_command(event)
+
+        assert "/router [on|off|reset|status] [--global]" in result
+
+    @pytest.mark.asyncio
+    async def test_router_invalid_option_explains_available_actions(self):
+        runner = _make_runner()
+
+        result = await runner._handle_router_command(_make_event("/router maybe"))
+
+        assert "Unknown `/router` option." in result
+        assert "/router status" in result
+        assert "/router on" in result
+        assert "/router off" in result
+        assert "/router reset" in result
+        assert "/router on --global" in result
+        assert "simple or complex route" in result
+        assert "current default model path" in result
+
+    @pytest.mark.asyncio
+    async def test_router_reset_global_combination_explains_scope_limit(self):
+        runner = _make_runner()
+
+        result = await runner._handle_router_command(_make_event("/router reset --global"))
+
+        assert "only works at the session scope" in result
+        assert "/router reset" in result
+        assert "/router off --global" in result
+
+    @pytest.mark.asyncio
+    async def test_router_status_explains_effective_behavior(self):
+        runner = _make_runner()
+
+        result = await runner._handle_router_command(_make_event("/router status"))
+
+        assert "🤖 Router: **enabled**" in result
+        assert "simple or complex route on the next message" in result
+        assert "Scope: `global`." in result
+
+    @pytest.mark.asyncio
+    async def test_router_session_off_reports_scope_and_behavior(self):
+        runner = _make_runner()
+
+        result = await runner._handle_router_command(_make_event("/router off"))
+
+        assert "Updated router for this session only." in result
+        assert "🤖 Router: **disabled**" in result
+        assert "will stay on the default model path" in result
+        assert "Scope: `session`." in result
+
+    @pytest.mark.asyncio
+    async def test_router_global_on_reports_saved_default(self):
+        runner = _make_runner()
+
+        result = await runner._handle_router_command(_make_event("/router on --global"))
+
+        assert "Saved router default to `config.yaml`." in result
+        assert "🤖 Router: **enabled**" in result
+        assert "simple or complex route on the next message" in result
+        assert "Scope: `global`." in result
+
+    @pytest.mark.asyncio
+    async def test_router_reset_reports_global_fallback_state(self):
+        runner = _make_runner()
+        event = _make_event("/router reset")
+        session_key = runner._session_key_for_source(event.source)
+        runner._session_router_overrides[session_key] = True
+
+        result = await runner._handle_router_command(event)
+
+        assert "🤖 Router override cleared" in result
+        assert "🤖 Router: **enabled**" in result
+        assert "following the global default again" in result
+        assert "Scope: `global`." in result

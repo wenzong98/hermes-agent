@@ -1674,6 +1674,7 @@ class TestSchemaInit:
         }
         assert "telegram_dm_topic_mode" in tables
         assert "telegram_dm_topic_bindings" in tables
+        assert "telegram_dm_topic_model_overrides" in tables
         assert db.get_meta("telegram_dm_topic_schema_version") == "2"
         db.close()
 
@@ -1703,6 +1704,81 @@ class TestSchemaInit:
         assert binding["session_key"] == "telegram:dm:208214988:thread:17585"
         assert binding["session_id"] == "topic-session"
         assert db.get_meta("telegram_dm_topic_schema_version") == "2"
+        db.close()
+
+    def test_telegram_topic_model_override_roundtrip_requires_explicit_schema(self, tmp_path):
+        db = SessionDB(db_path=tmp_path / "state.db")
+
+        assert db.get_telegram_topic_model_override(
+            chat_id="208214988",
+            thread_id="17585",
+        ) is None
+
+        db.set_telegram_topic_model_override(
+            chat_id="208214988",
+            thread_id="17585",
+            user_id="208214988",
+            model="gpt-topic",
+            provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            api_mode="codex_responses",
+        )
+
+        override = db.get_telegram_topic_model_override(
+            chat_id="208214988",
+            thread_id="17585",
+        )
+        assert override is not None
+        assert override["chat_id"] == "208214988"
+        assert override["thread_id"] == "17585"
+        assert override["user_id"] == "208214988"
+        assert override["model"] == "gpt-topic"
+        assert override["provider"] == "openai-codex"
+        assert override["base_url"] == "https://chatgpt.com/backend-api/codex"
+        assert override["api_mode"] == "codex_responses"
+        db.close()
+
+    def test_disable_telegram_topic_mode_clears_topic_model_overrides(self, tmp_path):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+        db.set_telegram_topic_model_override(
+            chat_id="208214988",
+            thread_id="17585",
+            user_id="208214988",
+            model="gpt-topic",
+            provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            api_mode="codex_responses",
+        )
+
+        db.disable_telegram_topic_mode(chat_id="208214988")
+
+        assert db.get_telegram_topic_model_override(
+            chat_id="208214988",
+            thread_id="17585",
+        ) is None
+        db.close()
+
+    def test_clear_telegram_topic_model_override_returns_status(self, tmp_path):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.set_telegram_topic_model_override(
+            chat_id="208214988",
+            thread_id="17585",
+            user_id="208214988",
+            model="gpt-topic",
+            provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            api_mode="codex_responses",
+        )
+
+        assert db.clear_telegram_topic_model_override(
+            chat_id="208214988",
+            thread_id="17585",
+        ) is True
+        assert db.clear_telegram_topic_model_override(
+            chat_id="208214988",
+            thread_id="17585",
+        ) is False
         db.close()
 
     def test_telegram_topic_binding_refuses_to_relink_session_to_another_topic(self, tmp_path):
@@ -3020,4 +3096,3 @@ class TestFTS5ToolCallMigration:
             assert version == SCHEMA_VERSION
         finally:
             session_db.close()
-

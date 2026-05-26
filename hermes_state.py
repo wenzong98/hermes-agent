@@ -2698,6 +2698,18 @@ class SessionDB:
 
                 CREATE INDEX IF NOT EXISTS idx_telegram_dm_topic_bindings_user
                 ON telegram_dm_topic_bindings(user_id, chat_id);
+
+                CREATE TABLE IF NOT EXISTS telegram_dm_topic_model_overrides (
+                    chat_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    provider TEXT,
+                    base_url TEXT,
+                    api_mode TEXT,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (chat_id, thread_id)
+                );
                 """
             )
 
@@ -2827,6 +2839,10 @@ class SessionDB:
                 if clear_bindings:
                     conn.execute(
                         "DELETE FROM telegram_dm_topic_bindings WHERE chat_id = ?",
+                        (str(chat_id),),
+                    )
+                    conn.execute(
+                        "DELETE FROM telegram_dm_topic_model_overrides WHERE chat_id = ?",
                         (str(chat_id),),
                     )
             except sqlite3.OperationalError:
@@ -2980,6 +2996,100 @@ class SessionDB:
                 ),
             )
         self._execute_write(_do)
+
+    def get_telegram_topic_model_override(
+        self,
+        *,
+        chat_id: str,
+        thread_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the persisted default model override for one Telegram DM topic."""
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    """
+                    SELECT * FROM telegram_dm_topic_model_overrides
+                    WHERE chat_id = ? AND thread_id = ?
+                    """,
+                    (str(chat_id), str(thread_id)),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
+        return dict(row) if row else None
+
+    def set_telegram_topic_model_override(
+        self,
+        *,
+        chat_id: str,
+        thread_id: str,
+        user_id: str,
+        model: str,
+        provider: Optional[str] = None,
+        base_url: Optional[str] = None,
+        api_mode: Optional[str] = None,
+    ) -> None:
+        """Persist the default model selection for one Telegram DM topic."""
+        self.apply_telegram_topic_migration()
+        now = time.time()
+        chat_id = str(chat_id)
+        thread_id = str(thread_id)
+        user_id = str(user_id)
+        model = str(model)
+        provider = str(provider) if provider is not None else None
+        base_url = str(base_url) if base_url is not None else None
+        api_mode = str(api_mode) if api_mode is not None else None
+
+        def _do(conn):
+            conn.execute(
+                """
+                INSERT INTO telegram_dm_topic_model_overrides (
+                    chat_id, thread_id, user_id, model, provider, base_url,
+                    api_mode, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, thread_id) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    model = excluded.model,
+                    provider = excluded.provider,
+                    base_url = excluded.base_url,
+                    api_mode = excluded.api_mode,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    chat_id,
+                    thread_id,
+                    user_id,
+                    model,
+                    provider,
+                    base_url,
+                    api_mode,
+                    now,
+                ),
+            )
+        self._execute_write(_do)
+
+    def clear_telegram_topic_model_override(
+        self,
+        *,
+        chat_id: str,
+        thread_id: str,
+    ) -> bool:
+        """Delete the persisted default model override for one Telegram DM topic."""
+        self.apply_telegram_topic_migration()
+        removed = False
+
+        def _do(conn):
+            nonlocal removed
+            cursor = conn.execute(
+                """
+                DELETE FROM telegram_dm_topic_model_overrides
+                WHERE chat_id = ? AND thread_id = ?
+                """,
+                (str(chat_id), str(thread_id)),
+            )
+            removed = cursor.rowcount > 0
+
+        self._execute_write(_do)
+        return removed
 
     def is_telegram_session_linked_to_topic(self, *, session_id: str) -> bool:
         """Return True if a Hermes session is already bound to any Telegram DM topic.
@@ -3276,4 +3386,3 @@ class SessionDB:
                 (error[:500], session_id),
             )
         self._execute_write(_do)
-

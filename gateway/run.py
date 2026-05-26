@@ -2270,6 +2270,78 @@ class GatewayRunner:
             session_id=session_entry.session_id,
         )
 
+    def _get_telegram_topic_model_override(
+        self,
+        source: SessionSource,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the persisted default model override for a Telegram topic lane."""
+        session_db = getattr(self, "_session_db", None)
+        if (
+            session_db is None
+            or not self._is_telegram_topic_lane(source)
+            or not source.chat_id
+            or not source.thread_id
+        ):
+            return None
+        try:
+            return session_db.get_telegram_topic_model_override(
+                chat_id=str(source.chat_id),
+                thread_id=str(source.thread_id),
+            )
+        except Exception:
+            logger.debug("Failed to read Telegram topic model override", exc_info=True)
+            return None
+
+    def _persist_telegram_topic_model_override(
+        self,
+        source: SessionSource,
+        *,
+        model: str,
+        provider: Optional[str],
+        base_url: Optional[str],
+        api_mode: Optional[str],
+    ) -> Optional[str]:
+        """Persist a default model for the current Telegram topic lane."""
+        if not self._is_telegram_topic_lane(source):
+            return "Topic-scoped model defaults are only available inside a Telegram topic."
+        session_db = getattr(self, "_session_db", None)
+        if session_db is None:
+            return "Telegram topic model defaults are unavailable because SessionDB is not initialized."
+        try:
+            session_db.set_telegram_topic_model_override(
+                chat_id=str(source.chat_id),
+                thread_id=str(source.thread_id),
+                user_id=str(source.user_id or ""),
+                model=model,
+                provider=provider,
+                base_url=base_url,
+                api_mode=api_mode,
+            )
+        except Exception as exc:
+            logger.exception("Failed to persist Telegram topic model override")
+            return f"Failed to save topic model default: {exc}"
+        return None
+
+    def _clear_telegram_topic_model_override(
+        self,
+        source: SessionSource,
+    ) -> tuple[bool, Optional[str]]:
+        """Clear the persisted default model for the current Telegram topic lane."""
+        if not self._is_telegram_topic_lane(source):
+            return False, "Topic-scoped model defaults are only available inside a Telegram topic."
+        session_db = getattr(self, "_session_db", None)
+        if session_db is None:
+            return False, "Telegram topic model defaults are unavailable because SessionDB is not initialized."
+        try:
+            removed = session_db.clear_telegram_topic_model_override(
+                chat_id=str(source.chat_id),
+                thread_id=str(source.thread_id),
+            )
+            return removed, None
+        except Exception as exc:
+            logger.exception("Failed to clear Telegram topic model override")
+            return False, f"Failed to clear topic model default: {exc}"
+
     def _recover_telegram_topic_thread_id(
         self,
         source: SessionSource,
@@ -2369,6 +2441,7 @@ class GatewayRunner:
                 )
                 model = plat_model
         override = self._session_model_overrides.get(resolved_session_key) if resolved_session_key else None
+        topic_override = None
         if override:
             override_model = override.get("model", model)
             override_runtime = {
@@ -2396,6 +2469,45 @@ class GatewayRunner:
                 resolved_session_key or "", model,
                 list(self._session_model_overrides.keys())[:5] if self._session_model_overrides else "[]",
             )
+            if source is not None:
+                topic_override = self._get_telegram_topic_model_override(source)
+            if topic_override:
+                topic_model = topic_override.get("model", model)
+                try:
+                    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+                    topic_runtime = resolve_runtime_provider(
+                        requested=(topic_override.get("provider") or None),
+                        explicit_base_url=(topic_override.get("base_url") or None),
+                        target_model=(topic_model or None),
+                    )
+                    topic_runtime_override = {
+                        "api_key": topic_runtime.get("api_key"),
+                        "base_url": topic_runtime.get("base_url"),
+                        "provider": topic_runtime.get("provider"),
+                        "api_mode": topic_runtime.get("api_mode"),
+                        "command": topic_runtime.get("command"),
+                        "args": list(topic_runtime.get("args") or []),
+                        "credential_pool": topic_runtime.get("credential_pool"),
+                    }
+                    runtime_model = topic_runtime_override.pop("model", None)
+                    if runtime_model:
+                        topic_model = runtime_model
+                    logger.debug(
+                        "Telegram topic model override: chat=%s thread=%s provider=%s model=%s",
+                        getattr(source, "chat_id", ""),
+                        getattr(source, "thread_id", ""),
+                        topic_runtime_override.get("provider"),
+                        topic_model,
+                    )
+                    return topic_model, topic_runtime_override
+                except Exception as exc:
+                    logger.warning(
+                        "Telegram topic model override failed for chat=%s thread=%s: %s",
+                        getattr(source, "chat_id", ""),
+                        getattr(source, "thread_id", ""),
+                        exc,
+                    )
 
         if not override and platform_model_cfg:
             try:
@@ -10181,6 +10293,8 @@ class GatewayRunner:
           /model                              — interactive picker (Telegram/Discord) or text list
           /model <name>                       — switch for this session only
           /model <name> --global              — switch and persist to config.yaml
+          /model <name> --topic               — switch and persist for this Telegram topic
+          /model --topic-reset                — clear the Telegram topic default model
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
         """
@@ -10194,8 +10308,23 @@ class GatewayRunner:
 
         raw_args = event.get_command_args().strip()
 
+        # Parse gateway-only --topic before the shared /model flag parser.
+        import re as _re
+
+        raw_args = _re.sub(r'[\u2012\u2013\u2014\u2015](topic(?:-reset)?)', r'--\1', raw_args)
+        persist_topic = False
+        clear_topic_default = False
+        if "--topic-reset" in raw_args:
+            clear_topic_default = True
+            raw_args = raw_args.replace("--topic-reset", " ").strip()
+        if "--topic" in raw_args:
+            persist_topic = True
+            raw_args = raw_args.replace("--topic", " ").strip()
+
         # Parse --provider and --global flags
         model_input, explicit_provider, persist_global = parse_model_flags(raw_args)
+        if sum(bool(x) for x in (persist_global, persist_topic, clear_topic_default)) > 1:
+            return "Use only one of --global, --topic, or --topic-reset."
 
         # Read current model/provider from config
         current_model = ""
@@ -10225,12 +10354,37 @@ class GatewayRunner:
         # Check for session override
         source = event.source
         session_key = self._session_key_for_source(source)
+        if (persist_topic or clear_topic_default) and not self._is_telegram_topic_lane(source):
+            return "Topic-scoped model defaults are only available inside a Telegram topic."
         override = self._session_model_overrides.get(session_key, {})
+        topic_override = None if override else self._get_telegram_topic_model_override(source)
         if override:
             current_model = override.get("model", current_model)
             current_provider = override.get("provider", current_provider)
             current_base_url = override.get("base_url", current_base_url)
             current_api_key = override.get("api_key", current_api_key)
+        elif topic_override:
+            current_model = topic_override.get("model", current_model)
+            current_provider = topic_override.get("provider", current_provider)
+            current_base_url = topic_override.get("base_url", current_base_url)
+
+        if clear_topic_default:
+            removed, clear_error = self._clear_telegram_topic_model_override(source)
+            if clear_error:
+                return clear_error
+            self._session_model_overrides.pop(session_key, None)
+            if hasattr(self, "_pending_model_notes"):
+                self._pending_model_notes.pop(session_key, None)
+            self._evict_cached_agent(session_key)
+            if removed:
+                return (
+                    "Cleared the default model for this Telegram topic. "
+                    "The next message here will use the platform/global default model."
+                )
+            return (
+                "This Telegram topic does not have a saved default model. "
+                "The next message here will use the platform/global default model."
+            )
 
         # No args: show interactive picker (Telegram/Discord) or text list
         if not model_input and not explicit_provider:
@@ -10316,6 +10470,16 @@ class GatewayRunner:
                             "base_url": result.base_url,
                             "api_mode": result.api_mode,
                         }
+                        if persist_topic:
+                            topic_error = _self._persist_telegram_topic_model_override(
+                                source,
+                                model=result.new_model,
+                                provider=result.target_provider,
+                                base_url=result.base_url,
+                                api_mode=result.api_mode,
+                            )
+                            if topic_error:
+                                return topic_error
 
                         # Evict cached agent so the next turn creates a fresh
                         # agent from the override rather than relying on the
@@ -10355,7 +10519,13 @@ class GatewayRunner:
                             if mi.has_cost_data():
                                 lines.append(t("gateway.model.cost_label", cost=mi.format_cost()))
                             lines.append(t("gateway.model.capabilities_label", capabilities=mi.format_capabilities()))
-                        lines.append(t("gateway.model.session_only_hint"))
+                        if persist_topic:
+                            lines.append(
+                                "Saved as the default model for this Telegram topic. "
+                                "/new in this topic will keep using it."
+                            )
+                        else:
+                            lines.append(t("gateway.model.session_only_hint"))
                         return "\n".join(lines)
 
                     metadata = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
@@ -10400,6 +10570,9 @@ class GatewayRunner:
             lines.append(t("gateway.model.usage_switch_model"))
             lines.append(t("gateway.model.usage_switch_provider"))
             lines.append(t("gateway.model.usage_persist"))
+            if self._is_telegram_topic_lane(source):
+                lines.append("Use `/model <name> --topic` to keep a model pinned to this Telegram topic across /new.")
+                lines.append("Use `/model --topic-reset` to remove the Telegram topic default model.")
             return "\n".join(lines)
 
         # Perform the switch
@@ -10456,6 +10629,16 @@ class GatewayRunner:
             "base_url": result.base_url,
             "api_mode": result.api_mode,
         }
+        if persist_topic:
+            topic_error = self._persist_telegram_topic_model_override(
+                source,
+                model=result.new_model,
+                provider=result.target_provider,
+                base_url=result.base_url,
+                api_mode=result.api_mode,
+            )
+            if topic_error:
+                return topic_error
 
         # Evict cached agent so the next turn creates a fresh agent from the
         # override rather than relying on cache signature mismatch detection.
@@ -10529,6 +10712,11 @@ class GatewayRunner:
 
         if persist_global:
             lines.append(t("gateway.model.saved_global"))
+        elif persist_topic:
+            lines.append(
+                "Saved as the default model for this Telegram topic. "
+                "/new in this topic will keep using it."
+            )
         else:
             lines.append(t("gateway.model.session_only_hint"))
 
@@ -12186,6 +12374,35 @@ class GatewayRunner:
         """
         from hermes_cli.commands import _router_disabled
 
+        def _router_usage_details() -> str:
+            return "\n".join(
+                [
+                    "Available `/router` actions:",
+                    "- `/router` or `/router status`: show whether task complexity routing is currently active, and whether the value comes from this session or the global default.",
+                    "- `/router on`: enable routing for this session only, so Hermes can automatically choose the simple or complex route on the next message.",
+                    "- `/router off`: disable routing for this session only, so Hermes stays on the current default model path instead of auto-switching by task complexity.",
+                    "- `/router reset`: clear this session override and fall back to the global default router setting.",
+                    "- `/router on --global`: save router enabled as the default in `config.yaml` for future sessions.",
+                    "- `/router off --global`: save router disabled as the default in `config.yaml` for future sessions.",
+                ]
+            )
+
+        def _router_state_summary(*, router_disabled: bool, scope: str, using_global_default: bool = False) -> str:
+            if router_disabled:
+                behavior = "Hermes will stay on the default model path and will not auto-switch models by task complexity."
+            else:
+                behavior = "Hermes will automatically choose the simple or complex route on the next message."
+            scope_line = f"Scope: `{scope}`."
+            if using_global_default:
+                scope_line += " This session is now following the global default again."
+            return "\n".join(
+                [
+                    f"🤖 Router: **{'disabled' if router_disabled else 'enabled'}**",
+                    behavior,
+                    scope_line,
+                ]
+            )
+
         raw_args = event.get_command_args().strip()
         arg, persist_global = self._parse_router_command_args(raw_args)
         session_key = self._session_key_for_source(event.source)
@@ -12196,24 +12413,27 @@ class GatewayRunner:
         has_session_override = session_key in (getattr(self, "_session_router_overrides", {}) or {})
 
         if not raw_args or arg in {"status", "?"}:
-            state = "disabled" if current else "enabled"
-            scope = "session" if has_session_override else "global"
-            return (
-                f"🤖 Router: **{state}**\n"
-                f"Task complexity routing is {'disabled' if current else 'active'}.\n"
-                f"Scope: `{scope}`."
+            return _router_state_summary(
+                router_disabled=current,
+                scope="session" if has_session_override else "global",
             )
 
         if arg == "reset":
             if persist_global:
-                return "Usage: /router reset (session only)"
+                return (
+                    "`/router reset` only works at the session scope and cannot be combined with `--global`.\n"
+                    + _router_usage_details()
+                )
             self._set_session_router_override(session_key, None)
             self._evict_cached_agent(session_key)
             current = _router_disabled()
-            state = "disabled" if current else "enabled"
             return (
-                f"🤖 Router override cleared\n"
-                f"Task complexity routing is now {state} for this session (using global default)."
+                "🤖 Router override cleared\n"
+                + _router_state_summary(
+                    router_disabled=current,
+                    scope="global",
+                    using_global_default=True,
+                )
             )
 
         if arg in {"on", "enable", "true", "1"}:
@@ -12221,24 +12441,31 @@ class GatewayRunner:
         elif arg in {"off", "disable", "false", "0"}:
             new_state = True
         else:
-            return "Usage: /router [on|off|reset|status] [--global]"
+            return (
+                "Unknown `/router` option.\n"
+                + _router_usage_details()
+            )
 
         if persist_global:
             _router_disabled(new_state)
             self._set_session_router_override(session_key, None)
             self._evict_cached_agent(session_key)
-            state = "disabled" if new_state else "enabled"
             return (
-                f"🤖 Router: **{state}**\n"
-                "Task complexity routing default saved to config and takes effect on next message."
+                "Saved router default to `config.yaml`.\n"
+                + _router_state_summary(
+                    router_disabled=new_state,
+                    scope="global",
+                )
             )
 
         self._set_session_router_override(session_key, new_state)
         self._evict_cached_agent(session_key)
-        state = "disabled" if new_state else "enabled"
         return (
-            f"🤖 Router: **{state}**\n"
-            "Task complexity routing updated for this session only and takes effect on next message."
+            "Updated router for this session only.\n"
+            + _router_state_summary(
+                router_disabled=new_state,
+                scope="session",
+            )
         )
 
     async def _handle_compress_command(self, event: MessageEvent) -> str:

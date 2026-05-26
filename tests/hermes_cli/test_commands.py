@@ -215,6 +215,12 @@ class TestGatewayHelpLines:
         assert len(bg_line) == 1
         assert "/bg" in bg_line[0]
 
+    def test_router_help_line_matches_gateway_behavior(self):
+        lines = gateway_help_lines()
+        router_line = [l for l in lines if l.startswith("`/router ")]
+        assert len(router_line) == 1
+        assert "[on|off|reset|status] [--global]" in router_line[0]
+
 
 class TestTelegramBotCommands:
     def test_returns_list_of_tuples(self):
@@ -632,6 +638,14 @@ class TestSubcommands:
         assert "list" in SUBCOMMANDS["/cron"]
         assert "add" in SUBCOMMANDS["/cron"]
 
+    def test_router_has_subcommands(self):
+        assert "/router" in SUBCOMMANDS
+        subs = SUBCOMMANDS["/router"]
+        assert "on" in subs
+        assert "off" in subs
+        assert "reset" in subs
+        assert "status" in subs
+
     def test_commands_without_subcommands_not_in_dict(self):
         """Plain commands should not appear in SUBCOMMANDS."""
         assert "/help" not in SUBCOMMANDS
@@ -655,6 +669,14 @@ class TestSubcommandCompletion:
         texts = {c.text for c in completions}
         assert "fast" in texts
         assert "normal" in texts
+
+    def test_router_subcommand_completion_after_space(self):
+        completions = _completions(SlashCommandCompleter(), "/router ")
+        texts = {c.text for c in completions}
+        assert "on" in texts
+        assert "off" in texts
+        assert "reset" in texts
+        assert "status" in texts
 
     def test_fast_command_filtered_out_when_unavailable(self):
         completions = _completions(
