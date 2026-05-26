@@ -2272,25 +2272,38 @@ class GatewayRunner:
 
     def _get_telegram_topic_model_override(
         self,
-        source: SessionSource,
+        source: Optional[SessionSource],
     ) -> Optional[Dict[str, Any]]:
-        """Return the persisted default model override for a Telegram topic lane."""
+        """Return the persisted default model override for a Telegram conversation lane.
+
+        Supported scopes:
+        - Telegram DM topic lane: (chat_id, thread_id)
+        - Telegram group thread: (chat_id, thread_id)
+        """
         session_db = getattr(self, "_session_db", None)
         if (
-            session_db is None
-            or not self._is_telegram_topic_lane(source)
+            source is None
+            or session_db is None
+            or source.platform != Platform.TELEGRAM
             or not source.chat_id
             or not source.thread_id
         ):
             return None
         try:
-            return session_db.get_telegram_topic_model_override(
-                chat_id=str(source.chat_id),
-                thread_id=str(source.thread_id),
-            )
+            if self._is_telegram_topic_lane(source):
+                return session_db.get_telegram_topic_model_override(
+                    chat_id=str(source.chat_id),
+                    thread_id=str(source.thread_id),
+                )
+            if source.chat_type != "dm":
+                return session_db.get_telegram_group_thread_model_override(
+                    chat_id=str(source.chat_id),
+                    thread_id=str(source.thread_id),
+                )
         except Exception:
-            logger.debug("Failed to read Telegram topic model override", exc_info=True)
+            logger.debug("Failed to read Telegram conversation model override", exc_info=True)
             return None
+        return None
 
     def _persist_telegram_topic_model_override(
         self,
@@ -2301,46 +2314,67 @@ class GatewayRunner:
         base_url: Optional[str],
         api_mode: Optional[str],
     ) -> Optional[str]:
-        """Persist a default model for the current Telegram topic lane."""
-        if not self._is_telegram_topic_lane(source):
-            return "Topic-scoped model defaults are only available inside a Telegram topic."
+        """Persist a default model for the current Telegram topic/thread lane."""
+        if source.platform != Platform.TELEGRAM:
+            return "Conversation-scoped model defaults are only available in Telegram chats."
         session_db = getattr(self, "_session_db", None)
         if session_db is None:
-            return "Telegram topic model defaults are unavailable because SessionDB is not initialized."
+            return "Telegram conversation model defaults are unavailable because SessionDB is not initialized."
         try:
-            session_db.set_telegram_topic_model_override(
-                chat_id=str(source.chat_id),
-                thread_id=str(source.thread_id),
-                user_id=str(source.user_id or ""),
-                model=model,
-                provider=provider,
-                base_url=base_url,
-                api_mode=api_mode,
-            )
+            if self._is_telegram_topic_lane(source):
+                session_db.set_telegram_topic_model_override(
+                    chat_id=str(source.chat_id),
+                    thread_id=str(source.thread_id),
+                    user_id=str(source.user_id or ""),
+                    model=model,
+                    provider=provider,
+                    base_url=base_url,
+                    api_mode=api_mode,
+                )
+                return None
+            if source.chat_type != "dm" and source.thread_id:
+                session_db.set_telegram_group_thread_model_override(
+                    chat_id=str(source.chat_id),
+                    thread_id=str(source.thread_id),
+                    user_id=str(source.user_id or ""),
+                    model=model,
+                    provider=provider,
+                    base_url=base_url,
+                    api_mode=api_mode,
+                )
+                return None
+            return "Conversation-scoped model defaults are only available inside a Telegram topic or a Telegram group thread."
         except Exception as exc:
-            logger.exception("Failed to persist Telegram topic model override")
-            return f"Failed to save topic model default: {exc}"
-        return None
+            logger.exception("Failed to persist Telegram conversation model override")
+            return f"Failed to save conversation model default: {exc}"
 
     def _clear_telegram_topic_model_override(
         self,
         source: SessionSource,
     ) -> tuple[bool, Optional[str]]:
-        """Clear the persisted default model for the current Telegram topic lane."""
-        if not self._is_telegram_topic_lane(source):
-            return False, "Topic-scoped model defaults are only available inside a Telegram topic."
+        """Clear the persisted default model for the current Telegram topic/thread lane."""
+        if source.platform != Platform.TELEGRAM:
+            return False, "Conversation-scoped model defaults are only available in Telegram chats."
         session_db = getattr(self, "_session_db", None)
         if session_db is None:
-            return False, "Telegram topic model defaults are unavailable because SessionDB is not initialized."
+            return False, "Telegram conversation model defaults are unavailable because SessionDB is not initialized."
         try:
-            removed = session_db.clear_telegram_topic_model_override(
-                chat_id=str(source.chat_id),
-                thread_id=str(source.thread_id),
-            )
-            return removed, None
+            if self._is_telegram_topic_lane(source):
+                removed = session_db.clear_telegram_topic_model_override(
+                    chat_id=str(source.chat_id),
+                    thread_id=str(source.thread_id),
+                )
+                return removed, None
+            if source.chat_type != "dm" and source.thread_id:
+                removed = session_db.clear_telegram_group_thread_model_override(
+                    chat_id=str(source.chat_id),
+                    thread_id=str(source.thread_id),
+                )
+                return removed, None
+            return False, "Conversation-scoped model defaults are only available inside a Telegram topic or a Telegram group thread."
         except Exception as exc:
-            logger.exception("Failed to clear Telegram topic model override")
-            return False, f"Failed to clear topic model default: {exc}"
+            logger.exception("Failed to clear Telegram conversation model override")
+            return False, f"Failed to clear conversation model default: {exc}"
 
     def _recover_telegram_topic_thread_id(
         self,
@@ -2494,7 +2528,7 @@ class GatewayRunner:
                     if runtime_model:
                         topic_model = runtime_model
                     logger.debug(
-                        "Telegram topic model override: chat=%s thread=%s provider=%s model=%s",
+                        "Telegram conversation model override: chat=%s thread=%s provider=%s model=%s",
                         getattr(source, "chat_id", ""),
                         getattr(source, "thread_id", ""),
                         topic_runtime_override.get("provider"),
@@ -2503,7 +2537,7 @@ class GatewayRunner:
                     return topic_model, topic_runtime_override
                 except Exception as exc:
                     logger.warning(
-                        "Telegram topic model override failed for chat=%s thread=%s: %s",
+                        "Telegram conversation model override failed for chat=%s thread=%s: %s",
                         getattr(source, "chat_id", ""),
                         getattr(source, "thread_id", ""),
                         exc,
@@ -3121,29 +3155,36 @@ class GatewayRunner:
         self,
         source: Optional[SessionSource],
     ) -> Optional[Dict[str, Any]]:
-        """Return the persisted router override for a Telegram DM or topic lane.
+        """Return a persisted Telegram conversation-scoped router override.
 
-        For topic lanes the key is (chat_id, thread_id); for the root DM
-        the key is (chat_id, "").  Returns None when no override is stored.
+        Supported scopes:
+        - Telegram DM root: (chat_id, "")
+        - Telegram DM topic lane: (chat_id, thread_id)
+        - Telegram group thread: (chat_id, thread_id)
         """
         session_db = getattr(self, "_session_db", None)
         if (
             source is None
             or session_db is None
             or source.platform != Platform.TELEGRAM
-            or source.chat_type != "dm"
             or not source.chat_id
         ):
             return None
         try:
-            thread_id = str(source.thread_id) if self._is_telegram_topic_lane(source) else ""
-            return session_db.get_telegram_topic_router_override(
-                chat_id=str(source.chat_id),
-                thread_id=thread_id,
-            )
+            if source.chat_type == "dm":
+                thread_id = str(source.thread_id) if self._is_telegram_topic_lane(source) else ""
+                return session_db.get_telegram_topic_router_override(
+                    chat_id=str(source.chat_id),
+                    thread_id=thread_id,
+                )
+            if source.thread_id:
+                return session_db.get_telegram_group_thread_router_override(
+                    chat_id=str(source.chat_id),
+                    thread_id=str(source.thread_id),
+                )
         except Exception:
-            logger.debug("Failed to read Telegram topic router override", exc_info=True)
-            return None
+            logger.debug("Failed to read Telegram conversation router override", exc_info=True)
+        return None
 
     def _persist_telegram_topic_router_override(
         self,
@@ -3151,45 +3192,63 @@ class GatewayRunner:
         *,
         router_disabled: bool,
     ) -> Optional[str]:
-        """Persist the router state for the current Telegram DM or topic lane."""
-        if source.platform != Platform.TELEGRAM or source.chat_type != "dm":
-            return "Conversation-scoped router defaults are only available inside a Telegram DM."
+        """Persist the router state for the current Telegram DM/topic/thread."""
+        if source.platform != Platform.TELEGRAM:
+            return "Conversation-scoped router defaults are only available in Telegram chats."
         session_db = getattr(self, "_session_db", None)
         if session_db is None:
-            return "Telegram topic router defaults are unavailable because SessionDB is not initialized."
+            return "Telegram conversation router defaults are unavailable because SessionDB is not initialized."
         try:
-            thread_id = str(source.thread_id) if self._is_telegram_topic_lane(source) else ""
-            session_db.set_telegram_topic_router_override(
-                chat_id=str(source.chat_id),
-                thread_id=thread_id,
-                user_id=str(source.user_id or ""),
-                router_disabled=router_disabled,
-            )
+            if source.chat_type == "dm":
+                thread_id = str(source.thread_id) if self._is_telegram_topic_lane(source) else ""
+                session_db.set_telegram_topic_router_override(
+                    chat_id=str(source.chat_id),
+                    thread_id=thread_id,
+                    user_id=str(source.user_id or ""),
+                    router_disabled=router_disabled,
+                )
+                return None
+            if source.thread_id:
+                session_db.set_telegram_group_thread_router_override(
+                    chat_id=str(source.chat_id),
+                    thread_id=str(source.thread_id),
+                    user_id=str(source.user_id or ""),
+                    router_disabled=router_disabled,
+                )
+                return None
+            return "Conversation-scoped router defaults are only available inside a Telegram DM or a Telegram group thread."
         except Exception as exc:
-            logger.exception("Failed to persist Telegram topic router override")
-            return f"Failed to save topic router default: {exc}"
-        return None
+            logger.exception("Failed to persist Telegram conversation router override")
+            return f"Failed to save conversation router default: {exc}"
 
     def _clear_telegram_topic_router_override(
         self,
         source: SessionSource,
     ) -> tuple[bool, Optional[str]]:
-        """Clear the persisted router state for the current Telegram DM or topic lane."""
-        if source.platform != Platform.TELEGRAM or source.chat_type != "dm":
-            return False, "Conversation-scoped router defaults are only available inside a Telegram DM."
+        """Clear the persisted router state for the current Telegram DM/topic/thread."""
+        if source.platform != Platform.TELEGRAM:
+            return False, "Conversation-scoped router defaults are only available in Telegram chats."
         session_db = getattr(self, "_session_db", None)
         if session_db is None:
-            return False, "Telegram topic router defaults are unavailable because SessionDB is not initialized."
+            return False, "Telegram conversation router defaults are unavailable because SessionDB is not initialized."
         try:
-            thread_id = str(source.thread_id) if self._is_telegram_topic_lane(source) else ""
-            removed = session_db.clear_telegram_topic_router_override(
-                chat_id=str(source.chat_id),
-                thread_id=thread_id,
-            )
-            return removed, None
+            if source.chat_type == "dm":
+                thread_id = str(source.thread_id) if self._is_telegram_topic_lane(source) else ""
+                removed = session_db.clear_telegram_topic_router_override(
+                    chat_id=str(source.chat_id),
+                    thread_id=thread_id,
+                )
+                return removed, None
+            if source.thread_id:
+                removed = session_db.clear_telegram_group_thread_router_override(
+                    chat_id=str(source.chat_id),
+                    thread_id=str(source.thread_id),
+                )
+                return removed, None
+            return False, "Conversation-scoped router defaults are only available inside a Telegram DM or a Telegram group thread."
         except Exception as exc:
-            logger.exception("Failed to clear Telegram topic router override")
-            return False, f"Failed to clear topic router default: {exc}"
+            logger.exception("Failed to clear Telegram conversation router override")
+            return False, f"Failed to clear conversation router default: {exc}"
 
     @staticmethod
     def _load_service_tier() -> str | None:
@@ -10381,8 +10440,8 @@ class GatewayRunner:
           /model                              — interactive picker (Telegram/Discord) or text list
           /model <name>                       — switch for this session only
           /model <name> --global              — switch and persist to config.yaml
-          /model <name> --topic               — switch and persist for this Telegram topic
-          /model --topic-reset                — clear the Telegram topic default model
+          /model <name> --topic               — switch and persist for this Telegram topic/thread
+          /model --topic-reset                — clear the Telegram topic/thread default model
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
         """
@@ -10442,8 +10501,21 @@ class GatewayRunner:
         # Check for session override
         source = event.source
         session_key = self._session_key_for_source(source)
-        if (persist_topic or clear_topic_default) and not self._is_telegram_topic_lane(source):
-            return "Topic-scoped model defaults are only available inside a Telegram topic."
+        _in_telegram_topic = self._is_telegram_topic_lane(source)
+        _in_group_thread = (
+            source.platform == Platform.TELEGRAM
+            and source.chat_type != "dm"
+            and bool(source.thread_id)
+        )
+        _supports_conversation_scope = _in_telegram_topic or _in_group_thread
+        if _in_telegram_topic:
+            _conversation_label = "this Telegram topic"
+        elif _in_group_thread:
+            _conversation_label = "this thread"
+        else:
+            _conversation_label = "this conversation"
+        if (persist_topic or clear_topic_default) and not _supports_conversation_scope:
+            return "Conversation-scoped model defaults are only available inside a Telegram topic or a Telegram group thread."
         override = self._session_model_overrides.get(session_key, {})
         topic_override = None if override else self._get_telegram_topic_model_override(source)
         if override:
@@ -10466,11 +10538,11 @@ class GatewayRunner:
             self._evict_cached_agent(session_key)
             if removed:
                 return (
-                    "Cleared the default model for this Telegram topic. "
+                    f"Cleared the default model for {_conversation_label}. "
                     "The next message here will use the platform/global default model."
                 )
             return (
-                "This Telegram topic does not have a saved default model. "
+                f"{_conversation_label.capitalize()} does not have a saved default model. "
                 "The next message here will use the platform/global default model."
             )
 
@@ -10609,8 +10681,8 @@ class GatewayRunner:
                             lines.append(t("gateway.model.capabilities_label", capabilities=mi.format_capabilities()))
                         if persist_topic:
                             lines.append(
-                                "Saved as the default model for this Telegram topic. "
-                                "/new in this topic will keep using it."
+                                f"Saved as the default model for {_conversation_label}. "
+                                f"/new in {_conversation_label.replace('this ', '')} will keep using it."
                             )
                         else:
                             lines.append(t("gateway.model.session_only_hint"))
@@ -10658,9 +10730,13 @@ class GatewayRunner:
             lines.append(t("gateway.model.usage_switch_model"))
             lines.append(t("gateway.model.usage_switch_provider"))
             lines.append(t("gateway.model.usage_persist"))
-            if self._is_telegram_topic_lane(source):
-                lines.append("Use `/model <name> --topic` to keep a model pinned to this Telegram topic across /new.")
-                lines.append("Use `/model --topic-reset` to remove the Telegram topic default model.")
+            if _supports_conversation_scope:
+                lines.append(
+                    f"Use `/model <name> --topic` to keep a model pinned to {_conversation_label} across /new."
+                )
+                lines.append(
+                    f"Use `/model --topic-reset` to remove the default model for {_conversation_label}."
+                )
             return "\n".join(lines)
 
         # Perform the switch
@@ -10802,8 +10878,8 @@ class GatewayRunner:
             lines.append(t("gateway.model.saved_global"))
         elif persist_topic:
             lines.append(
-                "Saved as the default model for this Telegram topic. "
-                "/new in this topic will keep using it."
+                f"Saved as the default model for {_conversation_label}. "
+                f"/new in {_conversation_label.replace('this ', '')} will keep using it."
             )
         else:
             lines.append(t("gateway.model.session_only_hint"))
@@ -12457,8 +12533,8 @@ class GatewayRunner:
             /router on                    Enable router for this session only
             /router off                   Disable router for this session only
             /router reset                 Clear this session override
-            /router on|off --topic        Persist router state for this Telegram topic
-            /router --topic-reset         Clear the Telegram topic default router state
+            /router on|off --topic        Persist router state for this Telegram DM/topic/thread
+            /router --topic-reset         Clear the Telegram conversation default router state
             /router on|off --global       Persist router state to config.yaml
             /router status                Show current effective state
         """
@@ -12467,12 +12543,12 @@ class GatewayRunner:
         def _router_usage_details(topic_hint: bool = False) -> str:
             lines = [
                 "Available `/router` actions:",
-                "- `/router` or `/router status`: show whether task complexity routing is currently active, and whether the value comes from this session, DM/topic, or global default.",
+                "- `/router` or `/router status`: show whether task complexity routing is currently active, and whether the value comes from this session, DM/topic/thread, or global default.",
             ]
             if topic_hint:
                 lines.append(
                     "- `/router on` / `off`: set the router default for **this conversation** "
-                    "(DM or topic) so it survives `/new`.  Use `--global` if you want to "
+                    "(DM, topic, or thread) so it survives `/new`.  Use `--global` if you want to "
                     "change the global default instead."
                 )
             else:
@@ -12481,8 +12557,8 @@ class GatewayRunner:
                 )
             lines.extend(
                 [
-                    "- `/router reset`: clear this session override and fall back to the DM/topic or global default.",
-                    "- `/router --topic-reset`: clear the saved router default for this DM or Telegram topic and fall back to the global default.",
+                    "- `/router reset`: clear this session override and fall back to the DM/topic/thread or global default.",
+                    "- `/router --topic-reset`: clear the saved router default for this DM, topic, or thread and fall back to the global default.",
                     "- `/router on --global`: save router enabled as the default in `config.yaml` for future sessions.",
                     "- `/router off --global`: save router disabled as the default in `config.yaml` for future sessions.",
                 ]
@@ -12517,11 +12593,25 @@ class GatewayRunner:
 
         _in_topic = self._is_telegram_topic_lane(event.source)
         _in_telegram_dm = event.source.platform == Platform.TELEGRAM and event.source.chat_type == "dm"
-        _conversation_label = "Telegram topic" if _in_topic else "this DM chat"
+        _in_group_thread = (
+            event.source.platform == Platform.TELEGRAM
+            and event.source.chat_type != "dm"
+            and bool(event.source.thread_id)
+        )
+        _supports_conversation_scope = _in_telegram_dm or _in_group_thread
+        if _in_topic:
+            _conversation_label = "Telegram topic"
+            _conversation_scope = "topic"
+        elif _in_group_thread:
+            _conversation_label = "this thread"
+            _conversation_scope = "thread"
+        else:
+            _conversation_label = "this DM chat"
+            _conversation_scope = "dm"
 
         session_key = self._session_key_for_source(event.source)
-        if (persist_topic or clear_topic_default) and not _in_telegram_dm:
-            return "Conversation-scoped router defaults are only available inside a Telegram DM."
+        if (persist_topic or clear_topic_default) and not _supports_conversation_scope:
+            return "Conversation-scoped router defaults are only available inside a Telegram DM or a Telegram group thread."
         current = self._resolve_session_router_disabled(
             source=event.source,
             session_key=session_key,
@@ -12546,7 +12636,7 @@ class GatewayRunner:
             )
 
         if not raw_args or arg in {"status", "?"}:
-            conv_scope = "topic" if _in_topic else ("dm" if _in_telegram_dm else "global")
+            conv_scope = _conversation_scope if _supports_conversation_scope else "global"
             return _router_state_summary(
                 router_disabled=current,
                 scope="session" if has_session_override else conv_scope if topic_override else "global",
@@ -12556,7 +12646,7 @@ class GatewayRunner:
             if persist_global or persist_topic or clear_topic_default:
                 return (
                     "`/router reset` only works at the session scope and cannot be combined with `--global`, `--topic`, or `--topic-reset`.\n"
-                    + _router_usage_details(topic_hint=_in_telegram_dm)
+                    + _router_usage_details(topic_hint=_supports_conversation_scope)
                 )
             self._set_session_router_override(session_key, None)
             self._evict_cached_agent(session_key)
@@ -12566,8 +12656,7 @@ class GatewayRunner:
                 if topic_override is not None
                 else _router_disabled()
             )
-            reset_scope = "topic" if _in_topic else ("dm" if _in_telegram_dm else "global")
-            reset_scope = reset_scope if topic_override is not None else "global"
+            reset_scope = _conversation_scope if topic_override is not None else "global"
             reset_note = (
                 f"This session is now following the {_conversation_label} default again."
                 if topic_override is not None
@@ -12589,7 +12678,7 @@ class GatewayRunner:
         else:
             return (
                 "Unknown `/router` option.\n"
-                + _router_usage_details(topic_hint=_in_telegram_dm)
+                + _router_usage_details(topic_hint=_supports_conversation_scope)
             )
 
         # In a Telegram DM (root or topic lane), /router on|off without
@@ -12611,7 +12700,7 @@ class GatewayRunner:
                 f"Saved router default for {_conversation_label}.\n"
                 + _router_state_summary(
                     router_disabled=new_state,
-                    scope="topic" if _in_topic else "dm",
+                    scope=_conversation_scope,
                 )
                 + "\n/new in this conversation will keep using it."
             )

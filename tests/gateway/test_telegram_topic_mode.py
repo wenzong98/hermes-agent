@@ -538,14 +538,17 @@ async def test_model_topic_persists_default_across_new(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_model_topic_requires_telegram_topic_lane(tmp_path):
+async def test_model_topic_requires_telegram_conversation_scope(tmp_path):
     session_db = SessionDB(db_path=tmp_path / "state.db")
     session_db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
     runner = _make_runner(session_db=session_db)
 
     result = await runner._handle_model_command(_make_event("/model gpt-topic --topic"))
 
-    assert result == "Topic-scoped model defaults are only available inside a Telegram topic."
+    assert (
+        result
+        == "Conversation-scoped model defaults are only available inside a Telegram topic or a Telegram group thread."
+    )
 
 
 @pytest.mark.asyncio
@@ -597,6 +600,132 @@ async def test_model_topic_reset_is_idempotent_when_no_saved_default(tmp_path):
     )
 
     assert "does not have a saved default model" in result
+
+
+@pytest.mark.asyncio
+async def test_model_topic_persists_default_for_telegram_group_thread(tmp_path, monkeypatch):
+    import gateway.run as gateway_run
+    import hermes_cli.runtime_provider as runtime_provider
+    from hermes_cli.model_switch import ModelSwitchResult
+
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    runner = _make_runner(session_db=session_db)
+    thread_source = _make_group_source(thread_id="555")
+    thread_key = build_session_key(thread_source)
+
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {"model": {"default": "global-model", "provider": "openrouter"}},
+    )
+
+    def fake_switch_model(**_kwargs):
+        return ModelSwitchResult(
+            success=True,
+            new_model="gpt-thread",
+            target_provider="openai-codex",
+            api_key="thread-key",
+            base_url="https://chatgpt.com/backend-api/codex",
+            api_mode="codex_responses",
+            provider_label="OpenAI Codex",
+        )
+
+    monkeypatch.setattr("hermes_cli.model_switch.switch_model", fake_switch_model)
+
+    result = await runner._handle_model_command(
+        _make_group_event("/model gpt-thread --topic", thread_id="555")
+    )
+
+    assert result is not None
+    assert "Saved as the default model for this thread" in result
+    assert runner._session_model_overrides[thread_key]["model"] == "gpt-thread"
+    thread_override = session_db.get_telegram_group_thread_model_override(
+        chat_id="-100123",
+        thread_id="555",
+    )
+    assert thread_override is not None
+    assert thread_override["model"] == "gpt-thread"
+    assert thread_override["provider"] == "openai-codex"
+
+    await runner._handle_reset_command(_make_group_event("/new", thread_id="555"))
+
+    assert thread_key not in runner._session_model_overrides
+    thread_override = session_db.get_telegram_group_thread_model_override(
+        chat_id="-100123",
+        thread_id="555",
+    )
+    assert thread_override is not None
+    assert thread_override["model"] == "gpt-thread"
+
+    def fake_resolve_runtime_provider(
+        *,
+        requested=None,
+        explicit_base_url=None,
+        explicit_api_key=None,
+        target_model=None,
+    ):
+        assert requested == "openai-codex"
+        assert explicit_base_url == "https://chatgpt.com/backend-api/codex"
+        assert explicit_api_key is None
+        assert target_model == "gpt-thread"
+        return {
+            "api_key": "re-resolved-thread-key",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+        }
+
+    monkeypatch.setattr(runtime_provider, "resolve_runtime_provider", fake_resolve_runtime_provider)
+
+    model, runtime_kwargs = runner._resolve_session_agent_runtime(
+        source=thread_source,
+        session_key=thread_key,
+        user_config={"model": {"default": "global-model", "provider": "openrouter"}},
+    )
+
+    assert model == "gpt-thread"
+    assert runtime_kwargs["provider"] == "openai-codex"
+    assert runtime_kwargs["api_key"] == "re-resolved-thread-key"
+
+
+@pytest.mark.asyncio
+async def test_model_topic_reset_clears_telegram_group_thread_override(tmp_path):
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    runner = _make_runner(session_db=session_db)
+    thread_key = build_session_key(_make_group_source(thread_id="555"))
+    runner._session_model_overrides[thread_key] = {
+        "model": "gpt-thread",
+        "provider": "openai-codex",
+        "api_key": "thread-key",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_mode": "codex_responses",
+    }
+    runner._pending_model_notes[thread_key] = "[Note: switched to gpt-thread.]"
+    session_db.set_telegram_group_thread_model_override(
+        chat_id="-100123",
+        thread_id="555",
+        user_id="208214988",
+        model="gpt-thread",
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_mode="codex_responses",
+    )
+
+    result = await runner._handle_model_command(
+        _make_group_event("/model --topic-reset", thread_id="555")
+    )
+
+    assert result is not None
+    assert "Cleared the default model for this thread" in result
+    assert thread_key not in runner._session_model_overrides
+    assert thread_key not in runner._pending_model_notes
+    assert session_db.get_telegram_group_thread_model_override(
+        chat_id="-100123",
+        thread_id="555",
+    ) is None
 
 
 @pytest.mark.asyncio
@@ -774,6 +903,77 @@ async def test_router_auto_detect_preserves_session_outside_telegram_dm(tmp_path
     assert "Updated router for this session only." in result
     session_key = runner._session_key_for_source(event.source)
     assert runner._session_router_overrides[session_key] is True
+
+
+@pytest.mark.asyncio
+async def test_router_topic_persists_for_telegram_group_thread(tmp_path):
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    runner = _make_runner(session_db=session_db)
+    thread_source = _make_group_source(thread_id="555")
+    thread_key = build_session_key(thread_source)
+
+    result = await runner._handle_router_command(
+        _make_group_event("/router off --topic", thread_id="555")
+    )
+
+    assert "Saved router default for this thread." in result
+    assert "Scope: `thread`." in result
+    assert runner._session_router_overrides[thread_key] is True
+    thread_override = session_db.get_telegram_group_thread_router_override(
+        chat_id="-100123",
+        thread_id="555",
+    )
+    assert thread_override is not None
+    assert thread_override["router_disabled"] == 1
+
+    await runner._handle_reset_command(_make_group_event("/new", thread_id="555"))
+
+    assert thread_key not in runner._session_router_overrides
+    thread_override = session_db.get_telegram_group_thread_router_override(
+        chat_id="-100123",
+        thread_id="555",
+    )
+    assert thread_override is not None
+    assert runner._resolve_session_router_disabled(
+        source=thread_source,
+        session_key=thread_key,
+    ) is True
+
+    status = await runner._handle_router_command(
+        _make_group_event("/router status", thread_id="555")
+    )
+    assert "🤖 Router: **disabled**" in status
+    assert "Scope: `thread`." in status
+
+
+@pytest.mark.asyncio
+async def test_router_topic_reset_clears_telegram_group_thread_override(tmp_path):
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    runner = _make_runner(session_db=session_db)
+    thread_key = build_session_key(_make_group_source(thread_id="555"))
+    runner._session_router_overrides[thread_key] = True
+    session_db.set_telegram_group_thread_router_override(
+        chat_id="-100123",
+        thread_id="555",
+        user_id="208214988",
+        router_disabled=True,
+    )
+
+    result = await runner._handle_router_command(
+        _make_group_event("/router --topic-reset", thread_id="555")
+    )
+
+    assert "Cleared the default router state for this thread" in result
+    assert thread_key not in runner._session_router_overrides
+    assert session_db.get_telegram_group_thread_router_override(
+        chat_id="-100123",
+        thread_id="555",
+    ) is None
+
+    status = await runner._handle_router_command(
+        _make_group_event("/router status", thread_id="555")
+    )
+    assert "Scope: `global`." in status
 
 
 @pytest.mark.asyncio
