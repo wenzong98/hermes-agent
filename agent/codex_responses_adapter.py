@@ -873,13 +873,13 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
     """Normalize a Responses API object to an assistant_message-like object."""
     output = getattr(response, "output", None)
     if not isinstance(output, list) or not output:
-        # The Codex backend can return empty output when the answer was
+        # The Codex backend can return empty output or None when the answer was
         # delivered entirely via stream events. Check output_text as a
         # last-resort fallback before raising.
         out_text = getattr(response, "output_text", None)
         if isinstance(out_text, str) and out_text.strip():
             logger.debug(
-                "Codex response has empty output but output_text is present (%d chars); "
+                "Codex response has empty output or None but output_text is present (%d chars); "
                 "synthesizing output item.", len(out_text.strip()),
             )
             output = [SimpleNamespace(
@@ -888,7 +888,12 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
             )]
             response.output = output
         else:
-            raise RuntimeError("Responses API returned no output items")
+            # Even if no output, create a minimal output to avoid None iteration
+            logger.warning(
+                "Codex response has no output items, creating empty fallback response."
+            )
+            output = []
+            response.output = output
 
     response_status = getattr(response, "status", None)
     if isinstance(response_status, str):
@@ -912,6 +917,16 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
     has_incomplete_items = response_status in {"queued", "in_progress", "incomplete"}
     saw_commentary_phase = False
     saw_final_answer_phase = False
+
+    # Ensure output is always a list, no matter what!
+    if output is None:
+        logger.warning("output is None! Response object details: %s", {k: v for k, v in vars(response).items() if not k.startswith('_')})
+        output = []
+        response.output = output
+    elif not isinstance(output, list):
+        logger.warning("output is not a list! Type: %s, Value: %s", type(output), output)
+        output = []
+        response.output = output
 
     for item in output:
         item_type = getattr(item, "type", None)

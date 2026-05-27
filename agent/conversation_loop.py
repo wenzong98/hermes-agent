@@ -1851,6 +1851,12 @@ def run_conversation(
                 break
 
             except Exception as api_error:
+                # Log full traceback for debugging!
+                import traceback
+                logger.error("=== FULL STACK TRACE ===")
+                logger.error(traceback.format_exc())
+                logger.error("========================")
+                
                 # Stop spinner before printing error messages
                 if thinking_spinner:
                     thinking_spinner.stop("(╥_╥) error, retrying...")

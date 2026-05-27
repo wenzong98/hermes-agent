@@ -645,7 +645,9 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     if "reasoning_content" not in msg and reasoning_text:
         msg["reasoning_content"] = reasoning_text
 
-    if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
+    if (hasattr(assistant_message, 'reasoning_details')
+            and assistant_message.reasoning_details
+            and isinstance(assistant_message.reasoning_details, (list, tuple))):
         # Pass reasoning_details back unmodified so providers (OpenRouter,
         # Anthropic, OpenAI) can maintain reasoning continuity across turns.
         # Each provider may include opaque fields (signature, encrypted_content)
@@ -659,6 +661,10 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
                 preserved.append(d.__dict__)
             elif hasattr(d, "model_dump"):
                 preserved.append(d.model_dump())
+            else:
+                # Skip non-serializable items (primitives, strings, etc.)
+                # rather than crashing with TypeError (#8878 guard).
+                continue
         if preserved:
             msg["reasoning_details"] = preserved
 
