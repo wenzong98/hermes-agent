@@ -181,6 +181,25 @@ class TestParseSceneFilename:
         assert meta.year == "2020"
         assert meta.resolution == "4k"
 
+    def test_parse_chinese_tv_show(self):
+        meta = parse_scene_filename("【某字幕组】绝命毒师 第五季 第01集 1080p.mp4")
+        assert meta.show == "绝命毒师"
+        assert meta.season == 5
+        assert meta.episode == 1
+
+    def test_parse_anime(self):
+        meta = parse_scene_filename("[SubGroup] 进击的巨人 - 12 [1080p][x264].mp4")
+        assert meta.show == "进击的巨人"
+        assert meta.season == 1
+        assert meta.episode == 12
+
+    def test_parse_dots_format(self):
+        meta = parse_scene_filename("Breaking.Bad.S01E05.1080p.WEB-DL.mp4")
+        assert meta.show == "breaking bad"
+        assert meta.season == 1
+        assert meta.episode == 5
+        assert meta.resolution == "1080p"
+
     def test_parse_date(self):
         meta = parse_scene_filename("Vlog 2023-05-12 Title.mp4")
         assert meta.date == "2023-05-12"

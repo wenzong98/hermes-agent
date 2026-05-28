@@ -396,12 +396,30 @@ def clean_folder_name(name: str, loose: bool = False) -> str:
     return clean_name_ad(name, loose=loose)
 
 
+def _zh_to_num(zh_str: str) -> int:
+    """Convert Chinese numerals to integer (up to 99)."""
+    if zh_str.isdigit():
+        return int(zh_str)
+    num_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
+    if zh_str == '十': return 10
+    if len(zh_str) == 1: return num_map.get(zh_str, 1)
+    if len(zh_str) == 2 and zh_str[0] == '十': return 10 + num_map.get(zh_str[1], 0)
+    if len(zh_str) == 2 and zh_str[1] == '十': return num_map.get(zh_str[0], 1) * 10
+    if len(zh_str) == 3 and zh_str[1] == '十': return num_map.get(zh_str[0], 1) * 10 + num_map.get(zh_str[2], 0)
+    return 1
+
+
 def parse_scene_filename(filename: str) -> SceneMetadata:
     """
     Parse scene filename for tags, actors, studio, resolution, dates, and standard TV patterns.
     Heavily inspired by Stash's Scene Filename Parser regex capabilities.
     """
     name_without_ext = filename.rsplit(".", 1)[0] if "." in filename else filename
+    
+    # If the filename uses dots instead of spaces (e.g. Breaking.Bad.S01E01.1080p), convert to spaces
+    if " " not in name_without_ext and name_without_ext.count(".") > 1:
+        name_without_ext = name_without_ext.replace(".", " ")
+
     meta = SceneMetadata(title=name_without_ext)
 
     # Extract YYYY-MM-DD or YY.MM.DD dates
@@ -441,17 +459,48 @@ def parse_scene_filename(filename: str) -> SceneMetadata:
     if res_match and not meta.resolution:
         meta.resolution = res_match.group(1).lower()
 
-    # Extract TV show season/episode (e.g. S01E01, 1x01)
-    se_match = re.search(r'\b[S]?(?P<season>\d{1,2})[EXx]+(?P<episode>\d{1,3})\b', name_without_ext, re.IGNORECASE)
+    # Extract TV show season/episode
+    show_name_end_idx = None
+    
+    # 1. Standard S01E01, 1x01
+    se_match = re.search(r'\b[S]?(?P<season>\d{1,2})[EXx]+(?P<episode>\d{1,4})\b', name_without_ext, re.IGNORECASE)
+    # 2. Chinese 第X季 第Y集/话/期
+    zh_se_match = re.search(r'第(?P<season>[一二三四五六七八九十\d]+)季\s*第?(?P<episode>\d{1,4})\s*[集话期]', name_without_ext)
+    # 3. Chinese 第Y集/话/期 (assume season 1)
+    zh_e_match = re.search(r'第(?P<episode>\d{1,4})\s*[集话期]', name_without_ext)
+    # 4. Anime EP01 or - 01 or [01]
+    anime_match = re.search(r'(?:\s+-\s+|\bEP\s*|\[)(?P<episode>\d{2,4})(?:\]|\b|END|v2)', name_without_ext, re.IGNORECASE)
+
     if se_match:
         meta.season = int(se_match.group("season"))
         meta.episode = int(se_match.group("episode"))
-        # heuristic for show name: everything before S01E01
-        show_name = name_without_ext[:se_match.start()].strip(" -_.")
+        show_name_end_idx = se_match.start()
+    elif zh_se_match:
+        meta.season = _zh_to_num(zh_se_match.group("season"))
+        meta.episode = int(zh_se_match.group("episode"))
+        show_name_end_idx = zh_se_match.start()
+    elif zh_e_match:
+        meta.season = 1
+        meta.episode = int(zh_e_match.group("episode"))
+        show_name_end_idx = zh_e_match.start()
+    elif anime_match:
+        meta.season = 1
+        meta.episode = int(anime_match.group("episode"))
+        show_name_end_idx = anime_match.start()
+
+    if show_name_end_idx is not None:
+        # heuristic for show name: everything before the episode marker
+        show_name = name_without_ext[:show_name_end_idx].strip(" -_.")
+        # If show_name is empty because it was entirely in brackets (e.g. "[Anime Title] - 12.mp4")
+        if not show_name:
+            first_bracket = re.search(r'\[([^\]]+)\]|【([^】]+)】', name_without_ext)
+            if first_bracket:
+                show_name = first_bracket.group(1) or first_bracket.group(2)
         # remove bracket tags from show name
         show_name = re.sub(r'\[.*?\]|【.*?】|\(.*?\)|（.*?）', '', show_name)
-        if show_name:
-            meta.show = clean_name_ad(show_name)
+        show_name = re.sub(r'\b(4k|1080p|720p|2160p|1440p|8k|480p)\b', '', show_name, flags=re.IGNORECASE)
+        if show_name.strip():
+            meta.show = clean_name_ad(show_name.strip())
 
     # Clean title
     title = name_without_ext
@@ -459,7 +508,10 @@ def parse_scene_filename(filename: str) -> SceneMetadata:
     title = re.sub(r'\b(4k|1080p|720p|2160p|1440p|8k|480p)\b', '', title, flags=re.IGNORECASE)
     
     if meta.season is not None:
-        title = re.sub(r'\b[S]?\d{1,2}[EXx]+\d{1,3}.*', '', title, flags=re.IGNORECASE)
+        title = re.sub(r'\b[S]?\d{1,2}[EXx]+\d{1,4}.*', '', title, flags=re.IGNORECASE)
+        title = re.sub(r'第[一二三四五六七八九十\d]+季.*', '', title)
+        title = re.sub(r'第\d{1,4}[集话期].*', '', title)
+        title = re.sub(r'(?:\s+-\s+|\bEP\s*)\d{2,4}.*', '', title, flags=re.IGNORECASE)
 
     # Extract Actor - Title format (supports multiple actors separated by comma or 'and')
     # e.g., "Actor A, Actor B - Title"
@@ -1060,17 +1112,18 @@ def cmd_organize(args):
         old_path = Path(v.path)
         
         # Determine target path based on Jellyfin rules
-        if meta.show and meta.season is not None and meta.episode is not None:
-            # TV Show
-            show_dir = meta.show
+        if (meta.show or meta.title) and meta.season is not None and meta.episode is not None:
+            # TV Show / Anime
+            show_name = meta.show if meta.show else meta.title
+            show_dir = show_name
             if meta.year:
                 show_dir += f" ({meta.year})"
             
             season_dir = f"Season {meta.season:02d}"
             ext = v.ext
             # e.g. "Show Name S01E01 - Title.mp4"
-            new_name = f"{meta.show} S{meta.season:02d}E{meta.episode:02d}"
-            if meta.title and meta.title.lower() != meta.show.lower():
+            new_name = f"{show_name} S{meta.season:02d}E{meta.episode:02d}"
+            if meta.title and meta.title.lower() != show_name.lower() and meta.show:
                 new_name += f" - {meta.title}"
             new_name += f".{ext}"
             
