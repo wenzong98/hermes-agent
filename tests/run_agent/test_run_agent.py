@@ -3875,6 +3875,33 @@ class TestNousCredentialRefresh:
         assert "default_headers" not in rebuilt["kwargs"]
         assert isinstance(agent.client, _RebuiltClient)
 
+    def test_try_refresh_nous_client_credentials_accepts_explicit_auth_mode(
+        self, agent, monkeypatch
+    ):
+        agent.provider = "nous"
+        agent.api_mode = "chat_completions"
+        captured = {}
+
+        def _fake_resolve(**kwargs):
+            captured.update(kwargs)
+            return {
+                "api_key": "new-nous-key",
+                "base_url": "https://inference-api.nousresearch.com/v1",
+            }
+
+        monkeypatch.setattr(
+            "hermes_cli.auth.resolve_nous_runtime_credentials", _fake_resolve
+        )
+
+        with patch("run_agent.OpenAI", return_value=MagicMock()):
+            ok = agent._try_refresh_nous_client_credentials(
+                force=False,
+                inference_auth_mode="legacy",
+            )
+
+        assert ok is True
+        assert captured["inference_auth_mode"] == "legacy"
+
 
 class TestCredentialPoolRecovery:
     def test_recover_with_pool_rotates_on_402(self, agent):
@@ -4088,6 +4115,25 @@ class TestCredentialPoolRecovery:
 
         assert context["reason"] == "usage_limit_reached"
         assert context["message"] == "The usage limit has been reached"
+
+    def test_extract_api_error_context_parses_resets_in_hours_and_minutes(self, agent, monkeypatch):
+        from agent import agent_runtime_helpers
+
+        monkeypatch.setattr(agent_runtime_helpers.time, "time", lambda: 1_000.0)
+        error = SimpleNamespace(
+            body={
+                "error": {
+                    "type": "GoUsageLimitError",
+                    "message": "Weekly usage limit reached. Resets in 6hr 29min.",
+                }
+            },
+            response=SimpleNamespace(headers={}),
+        )
+
+        context = agent._extract_api_error_context(error)
+
+        assert context["reason"] == "GoUsageLimitError"
+        assert context["reset_at"] == 1_000.0 + (6 * 60 * 60) + (29 * 60)
 
     def test_recover_with_pool_passes_error_context_on_rotated_429(self, agent):
         next_entry = SimpleNamespace(label="secondary")
