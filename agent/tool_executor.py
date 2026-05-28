@@ -534,11 +534,15 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 args_preview = args_str[:agent.log_prefix_chars] + "..." if len(args_str) > agent.log_prefix_chars else args_str
                 print(f"  📞 Tool {i}: {function_name}({list(function_args.keys())}) - {args_preview}")
 
-        # Per-query routing: if current model tier is simple but the tool is
-        # FORCE_COMPLEX, re-classify and upgrade the model tier before dispatch.
-        # This ensures that e.g. a "simple" session that suddenly needs to
-        # write_file or execute_code is handled by kimi-k2.6, not MiniMax.
-        if not _execution_blocked:
+        # Tool-level model upgrade: HARD-DISABLED.
+        # When a "simple" session encounters a FORCE_COMPLEX tool (e.g.
+        # write_file, execute_code), this block would upgrade the model tier
+        # before dispatch.  Currently disabled at code level — the conversation-
+        # level router (conversation_loop.py) handles model selection per turn,
+        # and no mid-turn tool-driven model switch is allowed.
+        # To re-enable, change _TOOL_LEVEL_MODEL_UPGRADE to True.
+        _TOOL_LEVEL_MODEL_UPGRADE = False
+        if not _execution_blocked and _TOOL_LEVEL_MODEL_UPGRADE:
             try:
                 from agent.task_complexity_router import (
                     Complexity,
@@ -556,7 +560,6 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     and current_complexity in ("simple", "unknown")
                     and route_source != "user_override"
                 ):
-                    # Re-classify based on the tool and its args
                     desc = f"{function_name} with args {str(function_args)[:100]}"
                     route = resolve_effective_model_route(
                         desc,
@@ -568,19 +571,18 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     if route.decision.complexity in (Complexity.FORCE_COMPLEX, Complexity.COMPLEX):
                         _tool_switched = activate_effective_route(agent, route)
 
-                        # 流式提示：工具触发模型切换
+                        if _tool_switched:
+                            _tool_switch_msg = (
+                                f"\n🔀 Router判断：工具 '{function_name}' 触发模型升级，"
+                                f"正在切换到 {route.model} "
+                                f"({route.provider or getattr(agent, 'provider', '')})\n"
+                            )
+                        else:
+                            _tool_switch_msg = (
+                                f"\n🔀 Router判断：工具 '{function_name}' 需要复杂模型，"
+                                f"保持当前模型\n"
+                            )
                         if agent.stream_delta_callback:
-                            if _tool_switched:
-                                _tool_switch_msg = (
-                                    f"\n🔀 Router判断：工具 '{function_name}' 触发模型升级，"
-                                    f"正在切换到 {route.model} "
-                                    f"({route.provider or getattr(agent, 'provider', '')})\n"
-                                )
-                            else:
-                                _tool_switch_msg = (
-                                    f"\n🔀 Router判断：工具 '{function_name}' 需要复杂模型，"
-                                    f"保持当前模型\n"
-                                )
                             try:
                                 agent.stream_delta_callback(_tool_switch_msg)
                             except Exception:
