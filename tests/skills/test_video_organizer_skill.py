@@ -33,6 +33,7 @@ from video_organizer import (
     is_image_file,
     is_video_file,
     load_protect_list,
+    parse_scene_filename,
     prune_empty_folders,
     save_protect_list,
     scan_directory,
@@ -157,6 +158,33 @@ class TestCleanNameAd:
         result = clean_folder_name("【字幕组】剧集名")
         assert "字幕组" not in result or "剧集名" in result
 
+
+class TestParseSceneFilename:
+    def test_parse_movie_with_tags(self):
+        meta = parse_scene_filename("[Studio] Some Actor, Another Actor - My Great Movie (2023) [1080p].mp4")
+        assert meta.title == "my great movie"
+        assert meta.year == "2023"
+        assert meta.studio == "Studio"
+        assert meta.resolution == "1080p"
+        assert "Some Actor" in meta.actors
+        assert "Another Actor" in meta.actors
+
+    def test_parse_tv_show(self):
+        meta = parse_scene_filename("Breaking Bad S02E05.mkv")
+        assert meta.show == "breaking bad"
+        assert meta.season == 2
+        assert meta.episode == 5
+
+    def test_parse_clean_title(self):
+        meta = parse_scene_filename("【字幕组】Movie Name (2020) [4K].mp4")
+        assert meta.title == "movie name"
+        assert meta.year == "2020"
+        assert meta.resolution == "4k"
+
+    def test_parse_date(self):
+        meta = parse_scene_filename("Vlog 2023-05-12 Title.mp4")
+        assert meta.date == "2023-05-12"
+        assert "title" in meta.title
 
 class TestScanDirectory:
     def test_scan_finds_files(self, sample_videos, tmp_drive):

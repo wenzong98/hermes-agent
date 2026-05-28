@@ -18,6 +18,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+try:
+    from PIL import Image
+    import imagehash
+    HAS_IMAGEHASH = True
+except ImportError:
+    HAS_IMAGEHASH = False
+
 VIDEO_EXTS = frozenset([
     "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "ts", "m4v", "3gp",
     "mpg", "mpeg", "rm", "rmvb", "vob", "ogv", "m2ts", "mts", "divx", "asf",
@@ -40,6 +47,19 @@ PROTECT_FILE = ".video_organizer_protect.json"
 
 
 @dataclass
+class SceneMetadata:
+    title: str
+    year: Optional[str] = None
+    studio: Optional[str] = None
+    actors: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    show: Optional[str] = None
+    season: Optional[int] = None
+    episode: Optional[int] = None
+    date: Optional[str] = None
+    resolution: Optional[str] = None
+
+@dataclass
 class FileInfo:
     path: str
     name: str
@@ -51,6 +71,8 @@ class FileInfo:
     is_video: bool = False
     is_audio: bool = False
     is_image: bool = False
+    phash: str = ""
+    metadata: Optional[SceneMetadata] = None
 
     @property
     def fingerprint(self) -> str:
@@ -140,6 +162,54 @@ def get_video_duration(filepath: str) -> float:
     return 0.0
 
 
+def compute_video_phash(filepath: str, duration: float, interval: float = 15.0) -> str:
+    """
+    Extract frames from video and compute a combined perceptual hash.
+    Mimics Czkawka's vid_dup_finder_lib:
+    - Samples frames at regular intervals (default every 15s).
+    - Uses perceptual hash (phash) which is more robust than average hash.
+    """
+    if not HAS_IMAGEHASH or duration <= 0:
+        return ""
+    
+    import tempfile
+    hashes = []
+    
+    # Calculate timestamps to sample: skip first 5% or 5s, then every `interval` seconds
+    start_offset = min(5.0, duration * 0.05)
+    num_frames = max(1, int((duration - start_offset) / interval))
+    # Cap at 20 frames to avoid excessive processing on very long videos
+    num_frames = min(20, num_frames)
+    
+    intervals = [start_offset + i * interval for i in range(num_frames)]
+    
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for i, ts in enumerate(intervals):
+            out_jpg = os.path.join(temp_dir, f"frame_{i}.jpg")
+            try:
+                # Extract one frame at timestamp. 
+                # scale to 144p to speed up extraction and hashing, since phash shrinks it to 8x8 anyway.
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-ss", str(ts), "-i", filepath, 
+                        "-vframes", "1", "-vf", "scale=-1:144", 
+                        "-q:v", "2", out_jpg
+                    ],
+                    capture_output=True, timeout=10
+                )
+                if os.path.exists(out_jpg):
+                    img = Image.open(out_jpg)
+                    # Compute perceptual hash (DCT based) like Czkawka
+                    h = str(imagehash.phash(img, hash_size=8))
+                    hashes.append(h)
+            except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+                continue
+                
+    if not hashes:
+        return ""
+    return "-".join(hashes)
+
+
 def load_protect_list(root: str) -> Set[str]:
     p = Path(root) / PROTECT_FILE
     if p.exists():
@@ -158,6 +228,7 @@ def save_protect_list(root: str, items: Set[str]) -> None:
 
 
 def scan_directory(root: str, compute_hash: bool = False, compute_duration: bool = False,
+                   compute_phash: bool = False, parse_meta: bool = False,
                    progress_callback=None) -> List[FileInfo]:
     files = []
     root_path = Path(root)
@@ -189,11 +260,17 @@ def scan_directory(root: str, compute_hash: bool = False, compute_duration: bool
             is_image=ext in IMAGE_EXTS,
         )
 
+        if parse_meta and fi.is_video:
+            fi.metadata = parse_scene_filename(fn)
+
         if compute_hash and fi.size > 0:
             fi.hash_md5 = compute_md5(fpath)
 
         if compute_duration and fi.is_video:
             fi.duration = get_video_duration(fpath)
+            
+        if compute_phash and fi.is_video and fi.duration > 0:
+            fi.phash = compute_video_phash(fpath, fi.duration)
 
         files.append(fi)
 
@@ -319,15 +396,102 @@ def clean_folder_name(name: str, loose: bool = False) -> str:
     return clean_name_ad(name, loose=loose)
 
 
-# ── File Dedup: 3-Stage Pipeline ──
+def parse_scene_filename(filename: str) -> SceneMetadata:
+    """
+    Parse scene filename for tags, actors, studio, resolution, dates, and standard TV patterns.
+    Heavily inspired by Stash's Scene Filename Parser regex capabilities.
+    """
+    name_without_ext = filename.rsplit(".", 1)[0] if "." in filename else filename
+    meta = SceneMetadata(title=name_without_ext)
+
+    # Extract YYYY-MM-DD or YY.MM.DD dates
+    date_match = re.search(r'\b(20\d{2}[-_.][01]\d[-_.][0-3]\d)\b', name_without_ext)
+    if date_match:
+        meta.date = date_match.group(1).replace('.', '-').replace('_', '-')
+        name_without_ext = name_without_ext.replace(date_match.group(1), '')
+
+    # Extract tags/studio in brackets
+    brackets = re.findall(r'\[([^\]]+)\]|【([^】]+)】|\(([^\)]+)\)|（([^）]+)）', name_without_ext)
+    tags = []
+    for b in brackets:
+        # Get the non-empty group
+        val = next((v for v in b if v), "").strip()
+        if not val:
+            continue
+            
+        val_lower = val.lower()
+        # Check if it's a resolution or year, not a tag/studio
+        if re.match(r'^(4k|1080p|720p|2160p|1440p|8k|480p)$', val_lower):
+            meta.resolution = val_lower
+            continue
+        if re.match(r'^(19|20)\d{2}$', val):
+            if not meta.year:
+                meta.year = val
+            continue
+            
+        # simple heuristic for studio (usually the first tag, often short, uppercase/camelcase)
+        if not meta.studio and (len(val) < 20 and not re.search(r'\d{4}', val)):
+            meta.studio = val
+        else:
+            tags.append(val)
+    meta.tags = tags
+
+    # Extract standalone resolution outside brackets
+    res_match = re.search(r'\b(4k|1080p|720p|2160p|1440p|8k|480p)\b', name_without_ext, re.IGNORECASE)
+    if res_match and not meta.resolution:
+        meta.resolution = res_match.group(1).lower()
+
+    # Extract TV show season/episode (e.g. S01E01, 1x01)
+    se_match = re.search(r'\b[S]?(?P<season>\d{1,2})[EXx]+(?P<episode>\d{1,3})\b', name_without_ext, re.IGNORECASE)
+    if se_match:
+        meta.season = int(se_match.group("season"))
+        meta.episode = int(se_match.group("episode"))
+        # heuristic for show name: everything before S01E01
+        show_name = name_without_ext[:se_match.start()].strip(" -_.")
+        # remove bracket tags from show name
+        show_name = re.sub(r'\[.*?\]|【.*?】|\(.*?\)|（.*?）', '', show_name)
+        if show_name:
+            meta.show = clean_name_ad(show_name)
+
+    # Clean title
+    title = name_without_ext
+    title = re.sub(r'\[.*?\]|【.*?】|\(.*?\)|（.*?）', '', title)
+    title = re.sub(r'\b(4k|1080p|720p|2160p|1440p|8k|480p)\b', '', title, flags=re.IGNORECASE)
+    
+    if meta.season is not None:
+        title = re.sub(r'\b[S]?\d{1,2}[EXx]+\d{1,3}.*', '', title, flags=re.IGNORECASE)
+
+    # Extract Actor - Title format (supports multiple actors separated by comma or 'and')
+    # e.g., "Actor A, Actor B - Title"
+    if " - " in title:
+        parts = title.split(" - ", 1)
+        actor_part = parts[0]
+        # split by comma, '&', ' and '
+        actor_names = re.split(r',|&|\band\b|与', actor_part)
+        actors = [a.strip() for a in actor_names if a.strip()]
+        
+        # heuristic: if it's a very long string, it might not be actors
+        if all(len(a) < 25 for a in actors) and len(actors) < 5:
+            meta.actors = actors
+            title = parts[1]
+
+    meta.title = clean_name_ad(title.strip(" -_."))
+    if not meta.title:
+        meta.title = name_without_ext
+
+    return meta
+
+
+# ── File Dedup: 4-Stage Pipeline ──
 
 def dedup_files(root: str, strictness: str = "strict", file_types: Optional[List[str]] = None,
-                progress_callback=None) -> List[Dict]:
+                use_phash: bool = False, progress_callback=None) -> List[Dict]:
     if file_types is None:
         file_types = ["video"]
 
     print(f"[Stage 0] Scanning files in {root} ...")
-    files = scan_directory(root, compute_hash=True, compute_duration=True, progress_callback=progress_callback)
+    files = scan_directory(root, compute_hash=True, compute_duration=True, 
+                           compute_phash=use_phash, progress_callback=progress_callback)
 
     type_filter = set()
     for ft in file_types:
@@ -367,6 +531,58 @@ def dedup_files(root: str, strictness: str = "strict", file_types: Optional[List
             groups.append({"ids": ids, "type": "hash", "items": items})
 
     print(f"  Found {len(groups)} hash-duplicate groups")
+
+    # Stage 1.5: Perceptual Hash
+    if use_phash and "video" in file_types and HAS_IMAGEHASH:
+        print("[Stage 1.5] Perceptual Hash similarity ...")
+        phash_groups = []
+        videos = [f for f in candidates if f.is_video and f.phash and f.path not in assigned]
+        
+        # O(N^2) comparison for phash. Threshold mimics Czkawka tolerance logic.
+        # Max Hamming distance per frame. A standard 8x8 phash has 64 bits.
+        # A distance <= 10 per frame is generally considered "similar".
+        phash_threshold_per_frame = 12 if strictness == "loose" else 8
+        duration_tolerance_ratio = 0.1 if strictness == "loose" else 0.05
+        
+        for i, root_v in enumerate(videos):
+            if root_v.path in assigned:
+                continue
+            group = [root_v]
+            root_hashes = [imagehash.hex_to_hash(h) for h in root_v.phash.split("-")]
+            
+            for j in range(i + 1, len(videos)):
+                target = videos[j]
+                if target.path in assigned:
+                    continue
+                
+                # Check duration similarity first (Czkawka requires within ~5%)
+                dur_diff_ratio = abs(root_v.duration - target.duration) / max(root_v.duration, target.duration)
+                if dur_diff_ratio > duration_tolerance_ratio:
+                    continue
+
+                target_hashes = [imagehash.hex_to_hash(h) for h in target.phash.split("-")]
+                
+                # Frame count should match or be very close
+                min_frames = min(len(root_hashes), len(target_hashes))
+                if min_frames == 0:
+                    continue
+                    
+                total_diff = 0
+                for k in range(min_frames):
+                    total_diff += root_hashes[k] - target_hashes[k]
+                
+                avg_diff_per_frame = total_diff / min_frames
+                if avg_diff_per_frame <= phash_threshold_per_frame:
+                    group.append(target)
+                        
+            if len(group) > 1:
+                ids = [f.path for f in group]
+                for i2 in ids:
+                    assigned.add(i2)
+                phash_groups.append({"ids": ids, "type": "phash", "items": group})
+                
+        groups.extend(phash_groups)
+        print(f"  Found {len(phash_groups)} phash-similar groups")
 
     # Stage 2: Video duration similarity
     stage2_groups = []
@@ -744,7 +960,7 @@ def export_tree(root: str, output: Optional[str] = None) -> str:
 # ── CLI ──
 
 def cmd_scan(args):
-    files = scan_directory(args.root, compute_hash=False, compute_duration=False)
+    files = scan_directory(args.root, compute_hash=False, compute_duration=False, parse_meta=args.parse)
     videos = [f for f in files if f.is_video]
     audios = [f for f in files if f.is_audio]
     images = [f for f in files if f.is_image]
@@ -767,11 +983,22 @@ def cmd_scan(args):
         print(f"\nTop 20 largest videos:")
         for v in sorted(videos, key=lambda x: x.size, reverse=True)[:20]:
             print(f"  {fmt_size(v.size):>12}  {v.name}")
+            if args.parse and v.metadata:
+                m = v.metadata
+                meta_str = []
+                if m.title: meta_str.append(f"Title: {m.title}")
+                if m.year: meta_str.append(f"Year: {m.year}")
+                if m.show: meta_str.append(f"Show: {m.show} S{m.season:02d}E{m.episode:02d}")
+                if m.studio: meta_str.append(f"Studio: {m.studio}")
+                if m.actors: meta_str.append(f"Actors: {','.join(m.actors)}")
+                if m.tags: meta_str.append(f"Tags: {','.join(m.tags)}")
+                if meta_str:
+                    print(f"                └─ {' | '.join(meta_str)}")
 
 
 def cmd_dedup(args):
     file_types = args.types.split(",") if args.types else ["video"]
-    groups = dedup_files(args.root, strictness=args.strictness, file_types=file_types)
+    groups = dedup_files(args.root, strictness=args.strictness, file_types=file_types, use_phash=args.phash)
 
     protect = load_protect_list(args.root)
     protected_count = 0
@@ -819,6 +1046,73 @@ def cmd_tree(args):
     export_tree(args.root, output=args.output)
 
 
+def cmd_organize(args):
+    print(f"[Organize] Scanning and organizing files in {args.root} ...")
+    files = scan_directory(args.root, parse_meta=True)
+    videos = [f for f in files if f.is_video and f.metadata]
+    
+    changes = []
+    for v in videos:
+        meta = v.metadata
+        if not meta:
+            continue
+            
+        old_path = Path(v.path)
+        
+        # Determine target path based on Jellyfin rules
+        if meta.show and meta.season is not None and meta.episode is not None:
+            # TV Show
+            show_dir = meta.show
+            if meta.year:
+                show_dir += f" ({meta.year})"
+            
+            season_dir = f"Season {meta.season:02d}"
+            ext = v.ext
+            # e.g. "Show Name S01E01 - Title.mp4"
+            new_name = f"{meta.show} S{meta.season:02d}E{meta.episode:02d}"
+            if meta.title and meta.title.lower() != meta.show.lower():
+                new_name += f" - {meta.title}"
+            new_name += f".{ext}"
+            
+            target_dir = Path(args.target_dir or args.root) / show_dir / season_dir
+        else:
+            # Movie
+            movie_name = meta.title
+            if meta.year:
+                movie_name += f" ({meta.year})"
+                
+            # Stash/Emby additional structure for actors/studios could go here if needed,
+            # but Jellyfin strictly prefers "Movie (Year)/Movie (Year).ext"
+            new_name = f"{movie_name}"
+            if meta.resolution:
+                new_name += f" - {meta.resolution}"
+            new_name += f".{v.ext}"
+            target_dir = Path(args.target_dir or args.root) / movie_name
+            
+        new_path = target_dir / new_name
+        
+        if old_path.resolve() != new_path.resolve():
+            changes.append({
+                "old": old_path,
+                "new": new_path,
+                "target_dir": target_dir
+            })
+
+    if args.dry_run:
+        print(f"[Dry Run] {len(changes)} files would be moved/renamed:")
+    else:
+        print(f"[Applied] {len(changes)} files moved/renamed:")
+        
+    for c in changes:
+        print(f"  {c['old'].name} -> {c['new']}")
+        if not args.dry_run:
+            try:
+                c['target_dir'].mkdir(parents=True, exist_ok=True)
+                shutil.move(str(c['old']), str(c['new']))
+            except OSError as e:
+                print(f"  Error moving {c['old'].name}: {e}")
+
+
 def cmd_protect(args):
     if args.add:
         protect = load_protect_list(args.root)
@@ -851,12 +1145,14 @@ def main():
     # scan
     p_scan = subparsers.add_parser("scan", help="Scan and list video files")
     p_scan.add_argument("root", help="Root directory to scan")
+    p_scan.add_argument("--parse", action="store_true", help="Parse scene metadata from filenames")
 
     # dedup
     p_dedup = subparsers.add_parser("dedup", help="Find duplicate video files")
     p_dedup.add_argument("root", help="Root directory to scan")
     p_dedup.add_argument("--strictness", choices=["strict", "loose"], default="strict", help="Matching strictness")
     p_dedup.add_argument("--types", default="video", help="File types: video,image,audio,other (comma-separated)")
+    p_dedup.add_argument("--phash", action="store_true", help="Enable perceptual hash (requires ffmpeg and ImageHash)")
 
     # folder-dedup
     p_fdedup = subparsers.add_parser("folder-dedup", help="Find duplicate folders")
@@ -882,6 +1178,13 @@ def main():
     p_prune.add_argument("--dry-run", action="store_true", default=True, help="Preview only (default)")
     p_prune.add_argument("--apply", dest="dry_run", action="store_false", help="Apply changes")
 
+    # organize
+    p_org = subparsers.add_parser("organize", help="Organize files into Jellyfin/Emby compatible folder structure")
+    p_org.add_argument("root", help="Root directory")
+    p_org.add_argument("--target-dir", help="Target directory (defaults to root if not specified)")
+    p_org.add_argument("--dry-run", action="store_true", default=True, help="Preview only (default)")
+    p_org.add_argument("--apply", dest="dry_run", action="store_false", help="Apply changes")
+
     # tree
     p_tree = subparsers.add_parser("tree", help="Export directory tree")
     p_tree.add_argument("root", help="Root directory")
@@ -905,6 +1208,7 @@ def main():
         "folder-dedup": cmd_folder_dedup,
         "rename": cmd_rename,
         "prune": cmd_prune,
+        "organize": cmd_organize,
         "tree": cmd_tree,
         "protect": cmd_protect,
     }
