@@ -24,6 +24,7 @@ import re
 import ssl
 import threading
 import time
+import traceback
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -334,26 +335,19 @@ def run_conversation(
                 )
                 if _switched:
                     _switch_msg = (
-                        f"🔀 Router判断：正在切换到 {_effective_route.model} "
-                        f"({_effective_route.provider or _old_provider_before_switch}){_llm_arbiter_suffix}"
+                        f"\n🔀 Router判断：正在切换到 {_effective_route.model} "
+                        f"({_effective_route.provider or _old_provider_before_switch}){_llm_arbiter_suffix}\n"
                     )
                 else:
                     _switch_msg = (
-                        f"🔀 Router判断：保持 {_old_model_before_switch} "
-                        f"({_old_provider_before_switch}) — 无需切换{_llm_arbiter_suffix}"
+                        f"\n🔀 Router判断：保持 {_old_model_before_switch} "
+                        f"({_old_provider_before_switch}) — 无需切换{_llm_arbiter_suffix}\n"
                     )
-                _callback_sent = False
-                if getattr(agent, "interim_assistant_callback", None):
+                if agent.stream_delta_callback:
                     try:
-                        agent.interim_assistant_callback(_switch_msg)
-                        _callback_sent = True
+                        agent.stream_delta_callback(_switch_msg)
                     except Exception:
                         pass
-                if not _callback_sent and agent.stream_delta_callback:
-                    try:
-                        agent.stream_delta_callback(f"\n{_switch_msg}\n")
-                    except Exception:
-                        pass  # 流式回调失败不阻塞主流程
 
                 # Expose decision on agent so tools / hooks can read it if needed
                 agent._current_routing_decision = _effective_route.decision
@@ -1851,12 +1845,8 @@ def run_conversation(
                 break
 
             except Exception as api_error:
-                # Log full traceback for debugging!
-                import traceback
-                logger.error("=== FULL STACK TRACE ===")
-                logger.error(traceback.format_exc())
-                logger.error("========================")
-                
+                logger.exception("API call failed in conversation loop")
+
                 # Stop spinner before printing error messages
                 if thinking_spinner:
                     thinking_spinner.stop("(╥_╥) error, retrying...")

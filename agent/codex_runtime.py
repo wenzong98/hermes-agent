@@ -265,6 +265,50 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                             len(agent._codex_streamed_text_parts), len(assembled),
                         )
                 return final_response
+        except TypeError as exc:
+            if "'NoneType' object is not iterable" in str(exc) and (
+                collected_output_items or agent._codex_streamed_text_parts
+            ):
+                logger.warning(
+                    "Codex Responses stream hit SDK TypeError (response.output=None); "
+                    "synthesizing from %d collected items + %d text deltas (%d chars). %s",
+                    len(collected_output_items),
+                    len(agent._codex_streamed_text_parts),
+                    sum(len(p) for p in agent._codex_streamed_text_parts),
+                    agent._client_log_context(),
+                )
+                if collected_output_items:
+                    final_response = SimpleNamespace(
+                        output=list(collected_output_items),
+                        status="completed",
+                    )
+                else:
+                    assembled = "".join(agent._codex_streamed_text_parts)
+                    final_response = SimpleNamespace(
+                        output=[SimpleNamespace(
+                            type="message",
+                            role="assistant",
+                            status="completed",
+                            content=[SimpleNamespace(type="output_text", text=assembled)],
+                        )],
+                        status="completed",
+                    )
+                return final_response
+            if attempt < max_stream_retries:
+                logger.debug(
+                    "Codex Responses stream TypeError (attempt %s/%s); retrying. %s error=%s",
+                    attempt + 1,
+                    max_stream_retries + 1,
+                    agent._client_log_context(),
+                    exc,
+                )
+                continue
+            logger.debug(
+                "Codex Responses stream TypeError; falling back to create(stream=True). %s error=%s",
+                agent._client_log_context(),
+                exc,
+            )
+            return agent._run_codex_create_stream_fallback(api_kwargs, client=active_client)
         except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
             if attempt < max_stream_retries:
                 logger.debug(

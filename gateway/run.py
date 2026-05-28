@@ -2276,9 +2276,13 @@ class GatewayRunner:
     ) -> Optional[Dict[str, Any]]:
         """Return the persisted default model override for a Telegram conversation lane.
 
-        Supported scopes:
-        - Telegram DM topic lane: (chat_id, thread_id)
-        - Telegram group thread: (chat_id, thread_id)
+        Resolution priority (only one scope is queried per call):
+        1. Telegram DM topic lane: _is_telegram_topic_lane → key=(chat_id, thread_id)
+        2. Telegram group thread: chat_type!="dm" with thread_id → key=(chat_id, thread_id)
+
+        DM topic and group thread tables are mutually exclusive because
+        ``_is_telegram_topic_lane`` requires ``chat_type=="dm"`` while the
+        group thread branch requires ``chat_type!="dm"``.
         """
         session_db = getattr(self, "_session_db", None)
         if (
@@ -3157,10 +3161,14 @@ class GatewayRunner:
     ) -> Optional[Dict[str, Any]]:
         """Return a persisted Telegram conversation-scoped router override.
 
-        Supported scopes:
-        - Telegram DM root: (chat_id, "")
-        - Telegram DM topic lane: (chat_id, thread_id)
-        - Telegram group thread: (chat_id, thread_id)
+        Resolution priority (only one scope is queried per call):
+        1. Telegram DM root:  chat_type=="dm" and no topic lane → key=(chat_id, "")
+        2. Telegram DM topic: chat_type=="dm" and topic lane   → key=(chat_id, thread_id)
+        3. Telegram group thread: chat_type!="dm" with thread_id → key=(chat_id, thread_id)
+
+        DM topic and group thread tables are mutually exclusive because
+        ``chat_type`` is either "dm" or not — they can never both match
+        the same source.
         """
         session_db = getattr(self, "_session_db", None)
         if (

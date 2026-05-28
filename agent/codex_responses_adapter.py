@@ -888,12 +888,13 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
             )]
             response.output = output
         else:
-            # Even if no output, create a minimal output to avoid None iteration
             logger.warning(
-                "Codex response has no output items, creating empty fallback response."
+                "Codex response has no output items and no output_text; "
+                "response status=%s model=%s",
+                getattr(response, "status", None),
+                getattr(response, "model", None),
             )
-            output = []
-            response.output = output
+            raise RuntimeError("Responses API returned no output items")
 
     response_status = getattr(response, "status", None)
     if isinstance(response_status, str):
@@ -917,16 +918,6 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
     has_incomplete_items = response_status in {"queued", "in_progress", "incomplete"}
     saw_commentary_phase = False
     saw_final_answer_phase = False
-
-    # Ensure output is always a list, no matter what!
-    if output is None:
-        logger.warning("output is None! Response object details: %s", {k: v for k, v in vars(response).items() if not k.startswith('_')})
-        output = []
-        response.output = output
-    elif not isinstance(output, list):
-        logger.warning("output is not a list! Type: %s, Value: %s", type(output), output)
-        output = []
-        response.output = output
 
     for item in output:
         item_type = getattr(item, "type", None)
