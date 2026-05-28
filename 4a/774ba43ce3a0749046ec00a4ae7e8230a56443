@@ -1,0 +1,461 @@
+skills/media/video-organizer/SKILL.md
+  dae0b3f8f86301e3 4,13-14,19,24-25,30,34-35,37,46-50,59-60,62-63,69,71-72,74-75,77-78,85-86,89,99-100 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a1830a4535f5e7ad9d57a65","tool_type":"agent","tool_id":"SearchReplace","line_ranges":[{"Single":4},{"Range":[13,14]},{"Single":19},{"Range":[24,25]},{"Single":30},{"Range":[34,35]},{"Single":37},{"Range":[46,50]},{"Range":[59,60]},{"Range":[62,63]},{"Single":69},{"Range":[71,72]},{"Range":[74,75]},{"Range":[77,78]},{"Range":[85,86]},{"Single":89},{"Range":[99,100]}]}]}
+tests/skills/test_video_organizer_skill.py
+  dae0b3f8f86301e3 36,162-188 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a1830a4535f5e7ad9d57a65","tool_type":"agent","tool_id":"SearchReplace","line_ranges":[{"Single":36},{"Range":[162,188]}]}]}
+skills/media/video-organizer/scripts/video_organizer.py
+  dae0b3f8f86301e3 21-27,49-61,74-75,165-212,231,263-265,271-273,399-485,488,493-494,535-586,963,986-996,1001,1049-1115,1148,1155,1181-1187,1211 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a1830a4535f5e7ad9d57a65","tool_type":"agent","tool_id":"SearchReplace","line_ranges":[{"Range":[21,27]},{"Range":[49,61]},{"Range":[74,75]},{"Range":[165,212]},{"Single":231},{"Range":[263,265]},{"Range":[271,273]},{"Range":[399,485]},{"Single":488},{"Range":[493,494]},{"Range":[535,586]},{"Single":963},{"Range":[986,996]},{"Single":1001},{"Range":[1049,1115]},{"Single":1148},{"Single":1155},{"Range":[1181,1187]},{"Single":1211}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "4a774ba43ce3a0749046ec00a4ae7e8230a56443",
+  "prompts": {
+    "dae0b3f8f86301e3": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a1823c3535f5e7ad9d575e5",
+        "model": "gemini-3.1-pro__dev"
+      },
+      "human_author": "xiawenzong <xiawenzong@bytedance.com>",
+      "messages": [],
+      "total_additions": 410,
+      "total_deletions": 77,
+      "accepted_lines": 369,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {
+    "skills/media/video-organizer/SKILL.md": [
+      {
+        "hash": "dae0b3f8f86301e3",
+        "line_ranges": [
+          {
+            "Single": 4
+          },
+          {
+            "Range": [
+              13,
+              14
+            ]
+          },
+          {
+            "Single": 19
+          },
+          {
+            "Range": [
+              24,
+              25
+            ]
+          },
+          {
+            "Single": 30
+          },
+          {
+            "Range": [
+              34,
+              35
+            ]
+          },
+          {
+            "Single": 37
+          },
+          {
+            "Range": [
+              46,
+              50
+            ]
+          },
+          {
+            "Range": [
+              59,
+              60
+            ]
+          },
+          {
+            "Range": [
+              62,
+              63
+            ]
+          },
+          {
+            "Single": 69
+          },
+          {
+            "Range": [
+              71,
+              72
+            ]
+          },
+          {
+            "Range": [
+              74,
+              75
+            ]
+          },
+          {
+            "Range": [
+              77,
+              78
+            ]
+          },
+          {
+            "Range": [
+              85,
+              86
+            ]
+          },
+          {
+            "Single": 89
+          },
+          {
+            "Range": [
+              99,
+              100
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a1830a4535f5e7ad9d57a65",
+            "tool_type": "agent",
+            "tool_id": "SearchReplace",
+            "line_ranges": [
+              {
+                "Single": 4
+              },
+              {
+                "Range": [
+                  13,
+                  14
+                ]
+              },
+              {
+                "Single": 19
+              },
+              {
+                "Range": [
+                  24,
+                  25
+                ]
+              },
+              {
+                "Single": 30
+              },
+              {
+                "Range": [
+                  34,
+                  35
+                ]
+              },
+              {
+                "Single": 37
+              },
+              {
+                "Range": [
+                  46,
+                  50
+                ]
+              },
+              {
+                "Range": [
+                  59,
+                  60
+                ]
+              },
+              {
+                "Range": [
+                  62,
+                  63
+                ]
+              },
+              {
+                "Single": 69
+              },
+              {
+                "Range": [
+                  71,
+                  72
+                ]
+              },
+              {
+                "Range": [
+                  74,
+                  75
+                ]
+              },
+              {
+                "Range": [
+                  77,
+                  78
+                ]
+              },
+              {
+                "Range": [
+                  85,
+                  86
+                ]
+              },
+              {
+                "Single": 89
+              },
+              {
+                "Range": [
+                  99,
+                  100
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "skills/media/video-organizer/scripts/video_organizer.py": [
+      {
+        "hash": "dae0b3f8f86301e3",
+        "line_ranges": [
+          {
+            "Range": [
+              21,
+              27
+            ]
+          },
+          {
+            "Range": [
+              49,
+              61
+            ]
+          },
+          {
+            "Range": [
+              74,
+              75
+            ]
+          },
+          {
+            "Range": [
+              165,
+              212
+            ]
+          },
+          {
+            "Single": 231
+          },
+          {
+            "Range": [
+              263,
+              265
+            ]
+          },
+          {
+            "Range": [
+              271,
+              273
+            ]
+          },
+          {
+            "Range": [
+              399,
+              485
+            ]
+          },
+          {
+            "Single": 488
+          },
+          {
+            "Range": [
+              493,
+              494
+            ]
+          },
+          {
+            "Range": [
+              535,
+              586
+            ]
+          },
+          {
+            "Single": 963
+          },
+          {
+            "Range": [
+              986,
+              996
+            ]
+          },
+          {
+            "Single": 1001
+          },
+          {
+            "Range": [
+              1049,
+              1115
+            ]
+          },
+          {
+            "Single": 1148
+          },
+          {
+            "Single": 1155
+          },
+          {
+            "Range": [
+              1181,
+              1187
+            ]
+          },
+          {
+            "Single": 1211
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a1830a4535f5e7ad9d57a65",
+            "tool_type": "agent",
+            "tool_id": "SearchReplace",
+            "line_ranges": [
+              {
+                "Range": [
+                  21,
+                  27
+                ]
+              },
+              {
+                "Range": [
+                  49,
+                  61
+                ]
+              },
+              {
+                "Range": [
+                  74,
+                  75
+                ]
+              },
+              {
+                "Range": [
+                  165,
+                  212
+                ]
+              },
+              {
+                "Single": 231
+              },
+              {
+                "Range": [
+                  263,
+                  265
+                ]
+              },
+              {
+                "Range": [
+                  271,
+                  273
+                ]
+              },
+              {
+                "Range": [
+                  399,
+                  485
+                ]
+              },
+              {
+                "Single": 488
+              },
+              {
+                "Range": [
+                  493,
+                  494
+                ]
+              },
+              {
+                "Range": [
+                  535,
+                  586
+                ]
+              },
+              {
+                "Single": 963
+              },
+              {
+                "Range": [
+                  986,
+                  996
+                ]
+              },
+              {
+                "Single": 1001
+              },
+              {
+                "Range": [
+                  1049,
+                  1115
+                ]
+              },
+              {
+                "Single": 1148
+              },
+              {
+                "Single": 1155
+              },
+              {
+                "Range": [
+                  1181,
+                  1187
+                ]
+              },
+              {
+                "Single": 1211
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "tests/skills/test_video_organizer_skill.py": [
+      {
+        "hash": "dae0b3f8f86301e3",
+        "line_ranges": [
+          {
+            "Single": 36
+          },
+          {
+            "Range": [
+              162,
+              188
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a1830a4535f5e7ad9d57a65",
+            "tool_type": "agent",
+            "tool_id": "SearchReplace",
+            "line_ranges": [
+              {
+                "Single": 36
+              },
+              {
+                "Range": [
+                  162,
+                  188
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "dae0b3f8f86301e3": {
+      "tool": "trae",
+      "conversation_id": "6a1823c3535f5e7ad9d575e5",
+      "session_id": "6a1823c3535f5e7ad9d575e5",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
