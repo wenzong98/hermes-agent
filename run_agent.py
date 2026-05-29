@@ -2576,6 +2576,7 @@ class AIAgent:
         try:
             import httpx as _httpx
             import socket as _socket
+            import os as _os
 
             _sock_opts = [(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)]
             if hasattr(_socket, "TCP_KEEPIDLE"):
@@ -2589,9 +2590,45 @@ class AIAgent:
             # Explicitly read proxy settings while still honoring NO_PROXY for
             # loopback / local endpoints such as a locally hosted sub2api.
             _proxy = _get_proxy_for_base_url(base_url)
+            
+            # Configure connection pool limits to prevent proxy connection leaks
+            # (matches the strategy from gateway/platforms/_http_client_limits.py)
+            def _env_float(name: str, default: float) -> float:
+                raw = _os.environ.get(name, "").strip()
+                if not raw:
+                    return default
+                try:
+                    val = float(raw)
+                except (TypeError, ValueError):
+                    return default
+                return val if val > 0 else default
+
+            def _env_int(name: str, default: int) -> int:
+                raw = _os.environ.get(name, "").strip()
+                if not raw:
+                    return default
+                try:
+                    val = int(raw)
+                except (TypeError, ValueError):
+                    return default
+                return val if val > 0 else default
+
+            _keepalive_expiry = _env_float(
+                "HERMES_GATEWAY_HTTPX_KEEPALIVE_EXPIRY", 10.0
+            )
+            _max_keepalive = _env_int(
+                "HERMES_GATEWAY_HTTPX_MAX_KEEPALIVE", 50
+            )
+            
+            _limits = _httpx.Limits(
+                max_keepalive_connections=_max_keepalive,
+                keepalive_expiry=_keepalive_expiry,
+            )
+            
             return _httpx.Client(
                 transport=_httpx.HTTPTransport(socket_options=_sock_opts),
                 proxy=_proxy,
+                limits=_limits,
             )
         except Exception:
             return None
