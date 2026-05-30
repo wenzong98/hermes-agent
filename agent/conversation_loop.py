@@ -474,15 +474,38 @@ def run_conversation(
                         f"\n🔀 Router判断：保持 {_old_model_before_switch} "
                         f"({_old_provider_before_switch}) — 无需切换{_llm_arbiter_suffix}\n"
                     )
-                if agent.stream_delta_callback:
+                # 优先走 interim_assistant_callback（直接通过 stream consumer 发送，
+                # 不依赖 streaming/flushing），其次 stream_delta_callback，
+                # 最后 status_callback（同步发送，对非流式 Telegram 批处理也有效）。
+                # 三者都失败则静默（路由器判定是辅助信息，不应打断主流程）。
+                _notice_sent = False
+                if agent.interim_assistant_callback:
+                    try:
+                        agent.interim_assistant_callback(_switch_msg, already_streamed=False)
+                        _notice_sent = True
+                    except Exception:
+                        pass
+                if not _notice_sent and agent.stream_delta_callback:
                     try:
                         agent.stream_delta_callback(_switch_msg)
+                        _notice_sent = True
+                    except Exception:
+                        pass
+                if not _notice_sent and agent.status_callback:
+                    try:
+                        agent.status_callback(_switch_msg.strip())
+                        _notice_sent = True
                     except Exception:
                         pass
 
                 # Expose decision on agent so tools / hooks can read it if needed
                 agent._current_routing_decision = _effective_route.decision
                 agent._current_effective_route = _effective_route
+                logging.debug(
+                    "[DEBUG ROUTER] decision made: switched=%s, msg=%s",
+                    _switched,
+                    _switch_msg[:120] if _switch_msg else None,
+                )
         except Exception as _router_err:
             logging.debug("Task complexity router error (non-fatal): %s", _router_err)
             agent._current_routing_decision = None

@@ -17416,6 +17416,10 @@ class GatewayRunner:
             def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
                 if not _run_still_current():
                     return
+                logger.debug(
+                    "[DEBUG ROUTER] interim_assistant_cb called: text=%s, _stream_consumer=%s, _status_adapter=%s",
+                    str(text)[:80], _stream_consumer is not None, _status_adapter is not None,
+                )
                 if _stream_consumer is not None:
                     if already_streamed:
                         _stream_consumer.on_segment_break()
@@ -17465,7 +17469,12 @@ class GatewayRunner:
                             except KeyError:
                                 pass
                         self._init_cached_agent_for_turn(agent, _interrupt_depth)
-                        logger.debug("Reusing cached agent for session %s", session_key)
+                        logger.debug(
+                            "Reusing cached agent for session %s (sig=%s); "
+                            "router_disabled will be re-resolved per-turn at line 17522",
+                            session_key,
+                            _sig,
+                        )
 
             if agent is None:
                 # Config changed or first message — create fresh agent
