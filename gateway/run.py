@@ -16237,12 +16237,39 @@ class GatewayRunner:
         Agents currently in _running_agents are SKIPPED for the same reason
         as _enforce_agent_cache_cap: tearing down an active turn's clients
         mid-flight would crash the request.
+
+        When FD pressure is high (process open FDs > 70% of soft limit),
+        the idle TTL is aggressively lowered to reclaim resources faster.
         """
         _cache = getattr(self, "_agent_cache", None)
         _lock = getattr(self, "_agent_cache_lock", None)
         if _cache is None or _lock is None:
             return 0
         now = time.time()
+
+        fd_pressure_idle_ttl = _AGENT_CACHE_IDLE_TTL_SECS
+        try:
+            import resource as _resource
+            soft_limit = _resource.getrlimit(_resource.RLIMIT_NOFILE)[0]
+            fd_count = len(os.listdir(f"/proc/self/fd")) if os.path.isdir("/proc/self/fd") else 0
+            if fd_count == 0:
+                try:
+                    import subprocess as _sp
+                    fd_count = int(_sp.run(["lsof", "-p", str(os.getpid())],
+                                           capture_output=True, text=True).stdout.count("\n"))
+                except Exception:
+                    pass
+            if fd_count > soft_limit * 0.7:
+                fd_pressure_idle_ttl = 300.0
+                logger.warning("FD pressure detected (%d/%d); lowering idle TTL to %.0fs",
+                               fd_count, soft_limit, fd_pressure_idle_ttl)
+            if fd_count > soft_limit * 0.9:
+                fd_pressure_idle_ttl = 60.0
+                logger.warning("Critical FD pressure (%d/%d); lowering idle TTL to %.0fs",
+                               fd_count, soft_limit, fd_pressure_idle_ttl)
+        except Exception:
+            pass
+
         to_evict: List[tuple] = []
         running_ids = {
             id(a)
@@ -16255,11 +16282,12 @@ class GatewayRunner:
                 if agent is None:
                     continue
                 if id(agent) in running_ids:
-                    continue  # mid-turn — don't tear it down
+                    continue
                 last_activity = getattr(agent, "_last_activity_ts", None)
                 if last_activity is None:
                     continue
-                if (now - last_activity) > _AGENT_CACHE_IDLE_TTL_SECS:
+                effective_ttl = fd_pressure_idle_ttl if fd_pressure_idle_ttl < _AGENT_CACHE_IDLE_TTL_SECS else _AGENT_CACHE_IDLE_TTL_SECS
+                if (now - last_activity) > effective_ttl:
                     to_evict.append((key, agent))
             for key, _ in to_evict:
                 _cache.pop(key, None)

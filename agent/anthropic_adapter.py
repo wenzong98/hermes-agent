@@ -598,11 +598,39 @@ def _build_anthropic_client_with_bearer_hook(
 
     normalize_proxy_env_vars()
 
-    from httpx import Timeout
+    from httpx import Timeout, Limits
     from agent.azure_identity_adapter import build_bearer_http_client
 
     _read_timeout = timeout if (isinstance(timeout, (int, float)) and timeout > 0) else 900.0
     timeout_obj = Timeout(timeout=float(_read_timeout), connect=10.0)
+
+    # Configure connection pool limits to prevent proxy connection leaks
+    def _env_float(name: str, default: float) -> float:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return default
+        return val if val > 0 else default
+
+    def _env_int(name: str, default: int) -> int:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            val = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return val if val > 0 else default
+
+    _keepalive_expiry = _env_float(
+        "HERMES_GATEWAY_HTTPX_KEEPALIVE_EXPIRY", 10.0
+    )
+    _max_keepalive = _env_int(
+        "HERMES_GATEWAY_HTTPX_MAX_KEEPALIVE", 50
+    )
 
     # Strip any trailing /v1 — the Anthropic SDK appends /v1/messages.
     normalized_base_url = _normalize_base_url_text(base_url)
@@ -610,7 +638,14 @@ def _build_anthropic_client_with_bearer_hook(
         import re as _re
         normalized_base_url = _re.sub(r"/v1/?$", "", normalized_base_url.rstrip("/"))
 
-    http_client = build_bearer_http_client(token_provider, timeout=timeout_obj)
+    http_client = build_bearer_http_client(
+        token_provider,
+        timeout=timeout_obj,
+        limits=Limits(
+            max_keepalive_connections=_max_keepalive,
+            keepalive_expiry=_keepalive_expiry,
+        ),
+    )
 
     kwargs = {
         "timeout": timeout_obj,
@@ -690,12 +725,52 @@ def build_anthropic_client(
 
     normalize_proxy_env_vars()
 
-    from httpx import Timeout
+    from httpx import Timeout, Limits, Client
 
     normalized_base_url = _normalize_base_url_text(base_url)
     _read_timeout = timeout if (isinstance(timeout, (int, float)) and timeout > 0) else 900.0
+
+    # Configure connection pool limits to prevent proxy connection leaks
+    # (matches the strategy from run_agent.py and gateway/platforms/_http_client_limits.py)
+    def _env_float(name: str, default: float) -> float:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return default
+        return val if val > 0 else default
+
+    def _env_int(name: str, default: int) -> int:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            val = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return val if val > 0 else default
+
+    _keepalive_expiry = _env_float(
+        "HERMES_GATEWAY_HTTPX_KEEPALIVE_EXPIRY", 10.0
+    )
+    _max_keepalive = _env_int(
+        "HERMES_GATEWAY_HTTPX_MAX_KEEPALIVE", 50
+    )
+
+    # Anthropic SDK doesn't accept 'limits' directly; pass via http_client.
+    http_client = Client(
+        timeout=Timeout(timeout=float(_read_timeout), connect=10.0),
+        limits=Limits(
+            max_keepalive_connections=_max_keepalive,
+            keepalive_expiry=_keepalive_expiry,
+        ),
+    )
+
     kwargs = {
         "timeout": Timeout(timeout=float(_read_timeout), connect=10.0),
+        "http_client": http_client,
     }
     if normalized_base_url:
         # Azure Anthropic endpoints require an ``api-version`` query parameter.

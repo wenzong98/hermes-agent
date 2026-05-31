@@ -13,6 +13,7 @@ import tempfile
 import threading
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -423,31 +424,49 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 # Job CRUD Operations
 # =============================================================================
 
+_cached_jobs: Optional[List[Dict[str, Any]]] = None
+_cached_jobs_ts: float = 0.0
+_CACHED_JOBS_TTL = 30.0
+
+
 def load_jobs() -> List[Dict[str, Any]]:
     """Load all jobs from storage."""
+    global _cached_jobs, _cached_jobs_ts
     ensure_dirs()
     if not JOBS_FILE.exists():
+        _cached_jobs = []
+        _cached_jobs_ts = time.time()
         return []
     
     try:
         with open(JOBS_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            return data.get("jobs", [])
+            jobs = data.get("jobs", [])
+            _cached_jobs = jobs
+            _cached_jobs_ts = time.time()
+            return jobs
     except json.JSONDecodeError:
-        # Retry with strict=False to handle bare control chars in string values
         try:
             with open(JOBS_FILE, 'r', encoding='utf-8') as f:
                 data = json.loads(f.read(), strict=False)
                 jobs = data.get("jobs", [])
                 if jobs:
-                    # Auto-repair: rewrite with proper escaping
                     save_jobs(jobs)
                     logger.warning("Auto-repaired jobs.json (had invalid control characters)")
+                _cached_jobs = jobs
+                _cached_jobs_ts = time.time()
                 return jobs
         except Exception as e:
             logger.error("Failed to auto-repair jobs.json: %s", e)
             raise RuntimeError(f"Cron database corrupted and unrepairable: {e}") from e
     except IOError as e:
+        if e.errno == 24 and _cached_jobs is not None:
+            logger.warning("FD exhausted reading jobs.json; returning cached copy (age=%.0fs)",
+                           time.time() - _cached_jobs_ts)
+            return _cached_jobs
+        if e.errno == 24 and _cached_jobs is None and time.time() - _cached_jobs_ts < _CACHED_JOBS_TTL:
+            logger.warning("FD exhausted reading jobs.json; no cache available, returning empty list")
+            return []
         logger.error("IOError reading jobs.json: %s", e)
         raise RuntimeError(f"Failed to read cron database: {e}") from e
 

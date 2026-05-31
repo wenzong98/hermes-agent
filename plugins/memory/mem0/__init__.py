@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 # for _BREAKER_COOLDOWN_SECS to avoid hammering a down server.
 _BREAKER_THRESHOLD = 5
 _BREAKER_COOLDOWN_SECS = 120
+_DEDUP_THRESHOLD = 0.92
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +54,7 @@ def _load_config() -> dict:
         # Local mode
         "local_mode": os.environ.get("MEM0_LOCAL_MODE", "false").lower() == "true",
         "minimax_api_key": os.environ.get("MINIMAX_API_KEY", ""),
-        "minimax_base_url": os.environ.get("MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic"),
+        "minimax_base_url": os.environ.get("MINIMAX_BASE_URL", "https://api.minimaxi.com/v1"),
         "minimax_model": os.environ.get("MEM0_MINIMAX_MODEL", "MiniMax-M2.7"),
         "chroma_path": os.environ.get("MEM0_CHROMA_PATH", "/tmp/mem0_chroma"),
         "collection_name": os.environ.get("MEM0_COLLECTION", "hermes_memories"),
@@ -116,6 +117,40 @@ CONCLUDE_SCHEMA = {
     },
 }
 
+FORGET_SCHEMA = {
+    "name": "mem0_forget",
+    "description": (
+        "Delete a specific memory by its ID. Use when user explicitly asks to forget, remove, or delete a stored fact. "
+        "Get memory IDs from mem0_profile or mem0_search results."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "memory_id": {"type": "string", "description": "The ID of the memory to delete."},
+        },
+        "required": ["memory_id"],
+    },
+}
+
+CURATE_SCHEMA = {
+    "name": "mem0_curate",
+    "description": (
+        "Curate and manage memories: deduplicate, categorize, summarize, and clean up stale entries. "
+        "Use when user asks to review, organize, clean up, or manage their memories."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["deduplicate", "summarize", "categorize", "list_stale"],
+                "description": "The curation action to perform.",
+            },
+        },
+        "required": ["action"],
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # MemoryProvider implementation
@@ -169,7 +204,7 @@ class Mem0MemoryProvider(MemoryProvider):
             {"key": "local_mode", "description": "Use local Mem0 library mode (MiniMax + FastEmbed + ChromaDB)", "default": "false", "choices": ["true", "false"]},
             {"key": "api_key", "description": "Mem0 Platform API key (cloud mode)", "secret": True, "required": False, "env_var": "MEM0_API_KEY", "url": "https://app.mem0.ai"},
             {"key": "minimax_api_key", "description": "MiniMax API key (local mode)", "secret": True, "required": False, "env_var": "MINIMAX_API_KEY"},
-            {"key": "minimax_base_url", "description": "MiniMax API base URL", "default": "https://api.minimaxi.com/anthropic"},
+            {"key": "minimax_base_url", "description": "MiniMax API base URL (OpenAI-compatible /v1 endpoint)", "default": "https://api.minimaxi.com/v1"},
             {"key": "chroma_path", "description": "Local ChromaDB path", "default": "/tmp/mem0_chroma"},
             {"key": "collection_name", "description": "ChromaDB collection name", "default": "hermes_memories"},
             {"key": "user_id", "description": "User identifier", "default": "hermes-user"},
@@ -185,7 +220,7 @@ class Mem0MemoryProvider(MemoryProvider):
                 "config": {
                     "model": cfg.get("minimax_model", "MiniMax-M2.7"),
                     "api_key": cfg.get("minimax_api_key", "") or os.environ.get("MINIMAX_API_KEY", ""),
-                    "minimax_base_url": cfg.get("minimax_base_url", "https://api.minimaxi.com/anthropic"),
+                    "minimax_base_url": cfg.get("minimax_base_url", "https://api.minimaxi.com/v1"),
                 },
             },
             "embedder": {
@@ -352,8 +387,118 @@ class Mem0MemoryProvider(MemoryProvider):
             "# Mem0 Memory\n"
             f"Active ({backend}). User: {self._user_id}.\n"
             "Use mem0_search to find memories, mem0_conclude to store facts, "
-            "mem0_profile for a full overview."
+            "mem0_forget to delete a memory, mem0_profile for a full overview, "
+            "mem0_curate to deduplicate/categorize/summarize memories."
         )
+
+    def _run_curation(self, action: str) -> Dict[str, Any]:
+        """Run a curation action on local-mode memories."""
+        collection = self._get_local_memory().vector_store.collection
+        raw = collection.get(where=self._read_filters(), include=["metadatas"])
+        metadatas = raw.get("metadatas") or []
+        if not metadatas:
+            return {"action": action, "result": "No memories found.", "count": 0}
+
+        if action == "categorize":
+            categories = {
+                "config": [], "preference": [], "fact": [], "skill": [],
+                "portfolio": [], "path": [], "other": [],
+            }
+            _CAT_KEYWORDS = {
+                "config": ["模型", "model", "provider", "API", "配置", "config", "proxy", "代理", "端口"],
+                "preference": ["偏好", "风格", "喜欢", "要求", "注重", "prefers", "偏好"],
+                "fact": ["住在", "名字", "是", "有", "路径", "挂载", "目录", "lives in", "name is"],
+                "skill": ["skill", "脚本", "命令", "安装", "已装", "yt-dlp"],
+                "portfolio": ["基金", "ETF", "QDII", "定投", "持仓", "投资", "策略", "portfolio"],
+                "path": ["归档", "博主", "视频", "目录"],
+            }
+            for meta in metadatas:
+                text = (meta.get("data") or meta.get("memory") or "").strip()
+                if not text:
+                    continue
+                matched = False
+                for cat, keywords in _CAT_KEYWORDS.items():
+                    if any(kw.lower() in text.lower() for kw in keywords):
+                        categories[cat].append(text)
+                        matched = True
+                        break
+                if not matched:
+                    categories["other"].append(text)
+
+            result_lines = [f"# Memory Categorization ({sum(len(v) for v in categories.values())} total)"]
+            for cat, items in categories.items():
+                if items:
+                    result_lines.append(f"\n## {cat.title()} ({len(items)})")
+                    for item in items:
+                        result_lines.append(f"- {item[:120]}")
+            return {"action": action, "result": "\n".join(result_lines), "categories": {k: len(v) for k, v in categories.items() if v}}
+
+        elif action == "deduplicate":
+            from collections import defaultdict as _dd
+            groups = _dd(list)
+            for meta in metadatas:
+                text = (meta.get("data") or meta.get("memory") or "").strip()
+                key = text[:100]
+                groups[key].append(meta.get("id", ""))
+            dup_groups = {k: v for k, v in groups.items() if len(v) > 1}
+            dup_count = sum(len(v) - 1 for v in dup_groups.values())
+            result_lines = [f"# Dedup Analysis: {len(metadatas)} memories, {len(dup_groups)} duplicate groups, {dup_count} removable"]
+            for key, ids in sorted(dup_groups.items()):
+                result_lines.append(f"\n- \"{key[:80]}\" x{len(ids)} (keep newest, delete {len(ids)-1})")
+            return {"action": action, "duplicate_groups": len(dup_groups), "removable_count": dup_count, "result": "\n".join(result_lines)}
+
+        elif action == "summarize":
+            all_texts = [(meta.get("data") or meta.get("memory") or "").strip() for meta in metadatas]
+            all_texts = [t for t in all_texts if t]
+            summary_parts = [
+                f"Total memories: {len(all_texts)}",
+                f"\n## User Profile Summary",
+            ]
+            user_facts = [t for t in all_texts if any(kw in t for kw in ["enzo", "用户", "User"])]
+            config_items = [t for t in all_texts if any(kw in t for kw in ["模型", "model", "配置", "config", "代理"])]
+            pref_items = [t for t in all_texts if any(kw in t for kw in ["偏好", "风格", "prefers", "要求"])]
+            path_items = [t for t in all_texts if any(kw in t for kw in ["路径", "path", "目录", "挂载"])]
+            portfolio_items = [t for t in all_texts if any(kw in t for kw in ["ETF", "基金", "定投", "portfolio"])]
+
+            if user_facts:
+                summary_parts.append("\n### Facts")
+                summary_parts.extend(f"- {t[:100]}" for t in user_facts[:10])
+            if config_items:
+                summary_parts.append("\n### Config/Tools")
+                summary_parts.extend(f"- {t[:100]}" for t in config_items[:10])
+            if pref_items:
+                summary_parts.append("\n### Preferences")
+                summary_parts.extend(f"- {t[:100]}" for t in pref_items[:10])
+            if path_items:
+                summary_parts.append("\n### Paths")
+                summary_parts.extend(f"- {t[:100]}" for t in path_items[:5])
+            if portfolio_items:
+                summary_parts.append("\n### Portfolio")
+                summary_parts.extend(f"- {t[:100]}" for t in portfolio_items[:5])
+
+            return {"action": action, "result": "\n".join(summary_parts)}
+
+        elif action == "list_stale":
+            import datetime as _dt
+            now_ts = _dt.datetime.now(_dt.timezone.utc).isoformat()
+            stale = []
+            for meta in metadatas:
+                created = meta.get("created_at", "") or ""
+                text = (meta.get("data") or meta.get("memory") or "").strip()
+                if created:
+                    try:
+                        age_days = (_dt.datetime.now(_dt.timezone.utc) - _dt.datetime.fromisoformat(created)).days
+                        if age_days > 14:
+                            stale.append({"id": meta.get("id", ""), "text": text[:80], "age_days": age_days})
+                    except (ValueError, TypeError):
+                        pass
+            stale.sort(key=lambda x: x["age_days"], reverse=True)
+            result_lines = [f"# Stale Memories (>14 days): {len(stale)}"]
+            for s in stale[:20]:
+                result_lines.append(f"- [{s['id'][:12]}] {s['age_days']}d old: {s['text']}")
+            return {"action": action, "stale_count": len(stale), "result": "\n".join(result_lines)}
+
+        return {"action": action, "error": f"Unknown curation action: {action}"}
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if self._prefetch_thread and self._prefetch_thread.is_alive():
@@ -393,7 +538,11 @@ class Mem0MemoryProvider(MemoryProvider):
         self._prefetch_thread.start()
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Send the turn to Mem0 for fact extraction (non-blocking)."""
+        """Send the turn to Mem0 for fact extraction (non-blocking).
+
+        Includes a semantic dedup pre-check: if a very similar memory already
+        exists (score > 0.92), the sync is skipped to avoid storing duplicates.
+        """
         if self._is_breaker_open():
             return
 
@@ -404,6 +553,17 @@ class Mem0MemoryProvider(MemoryProvider):
                     {"role": "user", "content": user_content},
                     {"role": "assistant", "content": assistant_content},
                 ]
+                if self._local_mode:
+                    results = self._local_semantic_search(query=user_content, top_k=3)
+                    for r in results:
+                        if r.get("score", 0) > _DEDUP_THRESHOLD:
+                            logger.debug(
+                                "sync_turn skipped: similar memory exists (score=%.2f) "
+                                "for content=%.80s",
+                                r["score"], user_content,
+                            )
+                            self._record_success()
+                            return
                 client.add(messages, **self._write_filters())
                 self._record_success()
             except Exception as e:
@@ -418,7 +578,7 @@ class Mem0MemoryProvider(MemoryProvider):
         self._sync_thread.start()
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [PROFILE_SCHEMA, SEARCH_SCHEMA, CONCLUDE_SCHEMA]
+        return [PROFILE_SCHEMA, SEARCH_SCHEMA, CONCLUDE_SCHEMA, FORGET_SCHEMA, CURATE_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._is_breaker_open():
@@ -492,6 +652,36 @@ class Mem0MemoryProvider(MemoryProvider):
             except Exception as e:
                 self._record_failure()
                 return tool_error(f"Failed to store: {e}")
+
+        elif tool_name == "mem0_forget":
+            memory_id = args.get("memory_id", "")
+            if not memory_id:
+                return tool_error("Missing required parameter: memory_id")
+            try:
+                if self._local_mode:
+                    collection = self._get_local_memory().vector_store.collection
+                    collection.delete(ids=[memory_id])
+                else:
+                    client.delete(memory_id)
+                self._record_success()
+                return json.dumps({"result": f"Memory {memory_id[:12]}... deleted."})
+            except Exception as e:
+                self._record_failure()
+                return tool_error(f"Failed to delete: {e}")
+
+        elif tool_name == "mem0_curate":
+            action = args.get("action", "")
+            if not action:
+                return tool_error("Missing required parameter: action")
+            if not self._local_mode:
+                return tool_error("mem0_curate is only available in local mode.")
+            try:
+                result = self._run_curation(action)
+                self._record_success()
+                return json.dumps(result, ensure_ascii=False)
+            except Exception as e:
+                self._record_failure()
+                return tool_error(f"Curation failed: {e}")
 
         return tool_error(f"Unknown tool: {tool_name}")
 

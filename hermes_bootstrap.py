@@ -122,8 +122,38 @@ def apply_windows_utf8_bootstrap() -> bool:
     return True
 
 
-# Apply on import — entry points just need ``import hermes_bootstrap``
-# (or ``from hermes_bootstrap import apply_windows_utf8_bootstrap``) at
-# the very top of their module, before importing anything else.  The
-# import side effect does the right thing.
+_fd_limit_applied = False
+
+
+def _raise_fd_limit() -> None:
+    """Raise the per-process file-descriptor limit on POSIX systems.
+
+    Long-running gateway processes accumulate open FDs (LLM client sockets,
+    ChromaDB connections, subprocess pipes, log files, SQLite WAL handles).
+    The macOS default soft limit is only 256, which is easily exhausted
+    under normal multi-session load, triggering ``[Errno 24] Too many open
+    files`` and cascading failures across cron, kanban, terminal, and
+    memory subsystems.
+
+    This raises the soft limit to the hard limit (or 65536, whichever is
+    lower) so the gateway can sustain typical concurrent-session workloads.
+    """
+    global _fd_limit_applied
+    if _fd_limit_applied:
+        return
+    if sys.platform == "win32":
+        _fd_limit_applied = True
+        return
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = min(hard, 65536)
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (ValueError, OSError, ImportError):
+        pass
+    _fd_limit_applied = True
+
+
 apply_windows_utf8_bootstrap()
+_raise_fd_limit()
